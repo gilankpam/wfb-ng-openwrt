@@ -53,8 +53,20 @@ start() {
 stop_one() {
     [ -f "$1" ] || return 0
     pid=$(cat "$1")
-    [ -n "$pid" ] && kill "$pid" 2>/dev/null
     rm -f "$1"
+    [ -n "$pid" ] || return 0
+    kill "$pid" 2>/dev/null || return 0
+    # Wait briefly for graceful exit, then force-kill, so the monitor vif is
+    # released before the caller tears it down.
+    i=0
+    while kill -0 "$pid" 2>/dev/null; do
+        i=$((i + 1))
+        if [ "$i" -ge 3 ]; then
+            kill -9 "$pid" 2>/dev/null
+            break
+        fi
+        sleep 1
+    done
 }
 
 stop() {
