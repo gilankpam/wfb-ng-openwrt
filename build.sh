@@ -15,6 +15,10 @@ IMG_PACKAGES="wfb-ng iw -wpad-basic-mbedtls -dnsmasq -odhcpd -ppp -ppp-mod-pppoe
 DOCKER_RUN=(docker run --rm --network host -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/work")
 
 build_sdk_image() {
+  # CI builds/caches the images via buildx and sets WFB_REUSE_IMAGES; reuse them.
+  if [ -n "${WFB_REUSE_IMAGES:-}" ]; then
+    echo "Reusing $SDK_IMAGE (WFB_REUSE_IMAGES set)"; return 0
+  fi
   docker build -t "$SDK_IMAGE" \
     --build-arg OPENWRT_VERSION="$OPENWRT_VERSION" \
     --build-arg OPENWRT_TARGET="$OPENWRT_TARGET" \
@@ -23,6 +27,9 @@ build_sdk_image() {
 }
 
 build_ib_image() {
+  if [ -n "${WFB_REUSE_IMAGES:-}" ]; then
+    echo "Reusing $IB_IMAGE (WFB_REUSE_IMAGES set)"; return 0
+  fi
   docker build -t "$IB_IMAGE" \
     --build-arg OPENWRT_VERSION="$OPENWRT_VERSION" \
     --build-arg OPENWRT_TARGET="$OPENWRT_TARGET" \
