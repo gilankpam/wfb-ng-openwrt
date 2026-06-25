@@ -1,0 +1,60 @@
+ath9k/mac80211: emit per-frame noise floor as radiotap DBM_ANTNOISE
+
+ath9k already computes the calibrated noise floor (ah->noise) and folds it into
+rx_status->signal. Expose it via a new ieee80211_rx_status.noise field and emit it
+in the monitor-mode radiotap header as IEEE80211_RADIOTAP_DBM_ANTNOISE (bit 6,
+immediately after DBM_ANTSIGNAL). This lets wfb-ng compute SNR = signal - noise on
+ath9k links, which otherwise report SNR 0 because mac80211 never emits antnoise.
+
+The hdrlen reservation and the writer are gated on the identical "status->noise"
+condition so the radiotap header stays byte-consistent. The CPE510 firmware is
+ath9k-only, so the sentinel gate is safe: ath9k sets noise on every frame.
+
+--- a/net/mac80211/rx.c
++++ b/net/mac80211/rx.c
+@@ -135,6 +135,10 @@
+ 	if (ieee80211_hw_check(&local->hw, SIGNAL_DBM))
+ 		len += 1;
+ 
++	/* IEEE80211_RADIOTAP_DBM_ANTNOISE */
++	if (status->noise)
++		len += 1;
++
+ 	/* antenna field, if we don't have per-chain info */
+ 	if (!status->chains)
+ 		len += 1;
+@@ -459,6 +463,14 @@
+ 		pos++;
+ 	}
+ 
++	/* IEEE80211_RADIOTAP_DBM_ANTNOISE */
++	if (status->noise) {
++		*pos = status->noise;
++		rthdr->it_present |=
++			cpu_to_le32(BIT(IEEE80211_RADIOTAP_DBM_ANTNOISE));
++		pos++;
++	}
++
+ 	/* IEEE80211_RADIOTAP_LOCK_QUALITY is missing */
+ 
+ 	if (!status->chains) {
+--- a/drivers/net/wireless/ath/ath9k/common.c
++++ b/drivers/net/wireless/ath/ath9k/common.c
+@@ -270,6 +270,7 @@
+ 	}
+ 
+ 	rxs->signal = ah->noise + rx_stats->rs_rssi;
++	rxs->noise = ah->noise;
+ }
+ EXPORT_SYMBOL(ath9k_cmn_process_rssi);
+ 
+--- a/include/net/mac80211.h
++++ b/include/net/mac80211.h
+@@ -1678,6 +1678,7 @@
+ 	u8 band;
+ 	u8 antenna;
+ 	s8 signal;
++	s8 noise;
+ 	u8 chains;
+ 	s8 chain_signal[IEEE80211_MAX_CHAINS];
+ 	u8 zero_length_psdu_type;
