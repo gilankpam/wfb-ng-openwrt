@@ -33,7 +33,7 @@ if [ -f /work/patches/mac80211/999-ath9k-radiotap-antnoise.patch ]; then
   cp /work/patches/mac80211/999-ath9k-radiotap-antnoise.patch "$MAC_PKG/patches/subsys/"
   sed -i 's/^PKG_RELEASE:=.*/PKG_RELEASE:=2/' "$MAC_PKG/Makefile"
 fi
-echo 'CONFIG_PACKAGE_kmod-ath9k=y' >> .config
+grep -q '^CONFIG_PACKAGE_kmod-ath9k=y' .config 2>/dev/null || echo 'CONFIG_PACKAGE_kmod-ath9k=y' >> .config
 make defconfig
 make package/kernel/mac80211/compile -j"$(nproc)"
 # apk filenames use dashes; the version begins with the kernel version digit, so
