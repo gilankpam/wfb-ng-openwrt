@@ -54,7 +54,7 @@ ath9k-only, so the sentinel gate is safe: ath9k sets noise on every frame.
  	u8 band;
  	u8 antenna;
  	s8 signal;
-+	s8 noise;
++	s8 noise;	/* NF in dBm; 0 = not present (ath9k radiotap antnoise) */
  	u8 chains;
  	s8 chain_signal[IEEE80211_MAX_CHAINS];
  	u8 zero_length_psdu_type;
