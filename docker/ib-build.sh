@@ -21,9 +21,12 @@ for p in $PROFILES; do
   man=$(find bin -name "*${p}*.manifest" | head -n1)
   [ -n "$man" ] || { echo "ERROR: no manifest for $p - cannot verify kmod override"; exit 1; }
   echo "--- $p wireless kmods ---"; grep -E '^kmod-(mac80211|ath9k|ath|cfg80211)' "$man" || true
-  # Fail if any kmod-mac80211 line is not our -r2 (catches a stock -r1 slipping in).
-  awk '$1=="kmod-mac80211"{if ($0 ~ /-r2/) ok=1; else bad=1} END{exit !(ok && !bad)}' "$man" \
-    || { echo "ERROR: $p kmod-mac80211 is not our -r2 build"; exit 1; }
+  # The struct-ABI change spans mac80211 + ath9k, so assert BOTH (plus ath9k-common) are our
+  # -r2 and that no stock -r1 of them slipped in (a mixed install would shift the noise offset).
+  for k in kmod-mac80211 kmod-ath9k kmod-ath9k-common; do
+    awk -v k="$k" '$1==k{if ($0 ~ /-r2$/) ok=1; else bad=1} END{exit !(ok && !bad)}' "$man" \
+      || { echo "ERROR: $p: $k is not our -r2 build"; exit 1; }
+  done
 done
 
 mkdir -p /work/output
