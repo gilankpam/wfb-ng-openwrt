@@ -24,6 +24,39 @@ Every task implicitly inherits these (verbatim from the spec):
 
 ---
 
+## APK Rework Addendum (2026-06-25, supersedes the ipk specifics in Tasks 4–6)
+
+This plan was written assuming OpenWrt's legacy opkg/`.ipk` flow. OpenWrt **25.12
+ships the `apk` package manager instead**, so Tasks 4–6 were reworked (user chose to
+stay on 25.12). Tasks 1–3 are unchanged. The reworked build was implemented
+controller-led (the apk path was exploratory and needed live iteration), and the
+**committed files are the source of truth** — `feed/net/wfb-ng/Makefile`,
+`docker/{Dockerfile.sdk,Dockerfile.imagebuilder,sdk-build.sh,sdk-fectest.sh,ib-build.sh}`,
+`build.sh`, `files/`. Deltas from the `.ipk` code blocks below:
+
+- **Package format:** SDK produces `wfb-ng-<ver>-r<rel>.apk` (e.g.
+  `wfb-ng-2025.06.25-r1.apk`), not `wfb-ng_*.ipk`. Copy/glob patterns use `*.apk`.
+- **libpcap source:** in the `base` feed (`src-git --root=package base … openwrt.git`),
+  not `packages`. `Dockerfile.sdk` bakes `feeds update packages` and `feeds update base`
+  as separate cached layers.
+- **Package-name collision:** `wfb-ng` also exists in the official `packages` feed
+  (v`25.01`). `sdk-build.sh` uses `feeds install -p wfbng -f wfb-ng` so our fork wins;
+  our `2025.06.25` also outranks `25.01` so the ImageBuilder selects our local apk.
+- **ImageBuilder:** drop `wfb-ng-*.apk` into `packages/`, build with
+  `make image PROFILE=<v> PACKAGES=... FILES=... ADD_LOCAL_KEY=1` (auto `apk mkndx` +
+  local signing-key trust). `Dockerfile.imagebuilder` also needs `python3-distutils`.
+- **Networking:** all `docker run` builds use `--network host` (the host resolver is
+  reliable; the default bridge hit transient DNS failures mid-build).
+- **qemu FEC test:** built from the source tarball in `dl/` (OpenWrt cleans the source
+  out of `build_dir` after packaging), linked **dynamically** and run under
+  `qemu-mips-static -L <toolchain sysroot>` (static musl C++ mishandles `_Unwind_*`).
+  Result: `fec_swfec_test: ALL OK` on big-endian MIPS.
+- **No static `/etc/config/wireless`** is shipped (see the §5 deviation note at the end).
+- **Validated:** `./build.sh all` from scratch produces all three CPE510 variants with
+  our `wfb-ng 2025.06.25-r1` (manifest-confirmed), sysupgrade ≈7.80 MB (within the 7680k budget).
+
+---
+
 ## File Structure
 
 | File | Responsibility |

@@ -126,16 +126,27 @@ confirmed against `make info` on the first ImageBuilder run; see §7.)
 
 ## 7. Build system (this repo) — Docker, SDK + ImageBuilder
 
-Two-stage, both stages pinned and containerized:
+Two-stage, both stages pinned and containerized. Both `docker run` builds use
+`--network host` (OpenWrt fetches sources at build time; the host resolver is the reliable one).
 
-1. **SDK stage** — compiles the wfb-ng package (`.ipk`) for `ath79/generic` (`mips_24kc`) from
+1. **SDK stage** — compiles the wfb-ng package (`.apk`) for `ath79/generic` (`mips_24kc`) from
    the fork. A Debian-based Dockerfile downloads the **pinned OpenWrt 25.12.x SDK** tarball for
-   `ath79/generic` from `downloads.openwrt.org` (robust regardless of Docker Hub tag
-   availability), installs the custom feed, and runs `make package/wfb-ng/compile`.
+   `ath79/generic` from `downloads.openwrt.org`, bakes in the `base` + `packages` feeds, then at
+   run time installs the custom feed and runs `make package/wfb-ng/compile`.
 2. **ImageBuilder stage** — assembles the CPE510 image(s). A Dockerfile downloads the **pinned
-   ImageBuilder** for the same version/target, registers the `.ipk` from stage 1 as a local
-   package source, and runs `make image` once per profile with the package list and files
-   overlay.
+   ImageBuilder** for the same version/target; the build drops the stage-1 `.apk` into the
+   ImageBuilder's `packages/` dir (auto-indexed via `apk mkndx`) and runs
+   `make image PROFILE=<v> PACKAGES=... FILES=... ADD_LOCAL_KEY=1` once per profile.
+
+### OpenWrt 25.12 / apk notes (settled during implementation)
+
+- **25.12 uses the `apk` package format**, not legacy opkg/`.ipk`. The package builds as
+  `wfb-ng-<version>-r<rel>.apk`; `ADD_LOCAL_KEY=1` makes the image trust the locally-signed package.
+- **`libpcap` lives in the `base` feed** (`src-git --root=package base … openwrt.git`), not the
+  `packages` feed; both feeds are baked into the SDK image (as separate layers).
+- **`wfb-ng` also exists in the official `packages` feed** (the full upstream version, `25.01`).
+  The SDK uses `feeds install -p wfbng` so our fork wins; our version `2025.06.25` also outranks
+  `25.01` by apk version order, so the ImageBuilder selects our local package too.
 
 ### Repository layout
 
@@ -155,14 +166,18 @@ wfb-ng-openwrt/
 │       └── files/
 │           ├── wfb-ng.sh           # launcher (start/stop/status)
 │           └── wfb-ng.conf         # default config (conffile)
-├── files/                          # ImageBuilder FILES overlay (rootfs additions)
-│   ├── etc/gs.key                  # copied from keys/gs.key by build.sh
-│   └── etc/config/wireless         # disables default radio
+├── files/                          # static rootfs overlay parts (currently empty;
+│                                   #   gs.key is staged in at build time)
 ├── keys/
 │   ├── gs.key
 │   └── drone.key
 └── output/                         # built images (per variant) + drone.key
 ```
+
+At build time `build.sh` assembles `build/overlay/` (the committed `files/` plus
+`keys/gs.key` → `etc/gs.key`) and passes it as `FILES=` to the ImageBuilder. Keeping `phy0`
+free for monitor mode relies on OpenWrt's default-disabled wifi + `wpad` removal + the
+launcher's own vif teardown (no static `/etc/config/wireless` is shipped — see the plan).
 
 ### Package list passed to ImageBuilder
 
