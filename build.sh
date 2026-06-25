@@ -11,8 +11,13 @@ cd "$(dirname "$0")"
 SDK_IMAGE="wfbng-sdk:${OPENWRT_VERSION}"
 IB_IMAGE="wfbng-ib:${OPENWRT_VERSION}"
 IMG_PACKAGES="wfb-ng iw -wpad-basic-mbedtls -dnsmasq -odhcpd -ppp -ppp-mod-pppoe -firewall4 -nftables -kmod-nft-core -kmod-nft-nat -kmod-nft-offload"
+# Run as root inside the container: the OpenWrt SDK's prebuilt sysroot is owned by
+# the buildbot uid, and `cp -p` during package install needs to own those files
+# (fails as a mismatched uid, e.g. on CI runners). We chown outputs back to the
+# caller (HOST_UID/HOST_GID) after each stage so build/ and output/ stay user-owned.
 # --network host: the OpenWrt builds fetch sources; use the host's resolver/network.
-DOCKER_RUN=(docker run --rm --network host -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/work")
+DOCKER_RUN=(docker run --rm --network host -e HOME=/tmp \
+  -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" -v "$PWD:/work")
 
 build_sdk_image() {
   # CI builds/caches the images via buildx and sets WFB_REUSE_IMAGES; reuse them.
@@ -47,7 +52,7 @@ cmd_package() {
   mkdir -p build/packages
   "${DOCKER_RUN[@]}" \
     -e WFB_REPO="$WFB_REPO" -e WFB_COMMIT="$WFB_COMMIT" -e WFB_VERSION="$WFB_VERSION" \
-    "$SDK_IMAGE" sh -ec '/work/docker/sdk-build.sh && /work/docker/sdk-fectest.sh'
+    "$SDK_IMAGE" sh -c 'set +e; /work/docker/sdk-build.sh && /work/docker/sdk-fectest.sh; rc=$?; chown -R "$HOST_UID:$HOST_GID" /work/build 2>/dev/null || true; exit $rc'
 }
 
 cmd_image() {
@@ -60,7 +65,7 @@ cmd_image() {
   mkdir -p output
   "${DOCKER_RUN[@]}" \
     -e PROFILES="$CPE510_PROFILES" -e PACKAGES="$IMG_PACKAGES" \
-    "$IB_IMAGE" sh -ec '/work/docker/ib-build.sh'
+    "$IB_IMAGE" sh -c 'set +e; /work/docker/ib-build.sh; rc=$?; chown -R "$HOST_UID:$HOST_GID" /work/output /work/build 2>/dev/null || true; exit $rc'
   echo "Images in ./output:"; ls -lh output/
 }
 
