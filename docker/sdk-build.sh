@@ -14,7 +14,7 @@ grep -q '^src-link wfbng ' feeds.conf 2>/dev/null || echo 'src-link wfbng /work/
 
 grep -q '^CONFIG_PACKAGE_wfb-ng=y' .config 2>/dev/null || echo 'CONFIG_PACKAGE_wfb-ng=y' >> .config
 make defconfig
-make package/wfb-ng/compile -j"$(nproc)" \
+make package/wfb-ng/compile -j1 V=s \
   WFB_REPO="${WFB_REPO}" WFB_COMMIT="${WFB_COMMIT}" WFB_VERSION="${WFB_VERSION}"
 
 mkdir -p /work/build/packages
