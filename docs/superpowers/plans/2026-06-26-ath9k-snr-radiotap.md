@@ -6,204 +6,161 @@
 
 **Architecture:** One source patch to OpenWrt's `mac80211` package (covers mac80211 core `rx.c` + `mac80211.h` and the in-bundle ath9k `common.c`). The patched kmod bundle is compiled in the existing OpenWrt **SDK** Docker stage and handed to the **ImageBuilder** stage, which installs our higher-`PKG_RELEASE` kmods in place of stock — mirroring how the repo already ships the `wfb-ng` package.
 
-**Tech Stack:** OpenWrt 25.12.4 (ath79/generic, `mips_24kc`), OpenWrt SDK + ImageBuilder in Docker, `quilt` (OpenWrt's patch-authoring tool), ath9k/mac80211 (Linux backports), `wfb-ng` (consumer, unchanged).
+**Tech Stack:** OpenWrt 25.12.4 (ath79/generic, `mips_24kc`, **kernel linux-6.12.87**), **mac80211 backports 6.18.26-1**, OpenWrt SDK + ImageBuilder in Docker, `quilt` (OpenWrt's patch-authoring tool), ath9k/mac80211, `wfb-ng` (consumer, unchanged).
 
 ## Global Constraints
 
 Copied verbatim from the spec; every task inherits these.
 
-- OpenWrt **25.12.4**, target **ath79/generic**, arch **mips_24kc** (big-endian MIPS) — pinned in `versions.env`.
+- OpenWrt **25.12.4** (code `r32933-4ccb782af7`), target **ath79/generic**, arch **mips_24kc** (big-endian MIPS) — pinned in `versions.env`; package format is **`.apk`** (not `.ipk`).
 - Build profiles: **`tplink_cpe510-v1 tplink_cpe510-v2 tplink_cpe510-v3`** (build all three).
-- **Image budget: every `*sysupgrade.bin` ≤ `7680 * 1024` bytes** — the existing assertion in `docker/ib-build.sh` must still pass.
+- **Image budget: every `*sysupgrade.bin` ≤ `7680 * 1024` = 7864320 bytes** — the existing assertion in `docker/ib-build.sh` must still pass.
 - The fix is **driver-side only** — **no change to wfb-ng source**.
 - Noise value is the **real `ah->noise`** (live calibrated NF), not a constant.
-- Radiotap emit is **gated on `status->noise != 0`** (sentinel; safe because the image is ath9k-only).
-- **One** patch file in the `mac80211` package; **bump that package's `PKG_RELEASE` once** so all its kmods outrank stock.
-- SDK and ImageBuilder are the **same** OpenWrt release, so kernel vermagic matches.
+- Radiotap emit is **gated on `status->noise != 0`** (sentinel; safe because the image is ath9k-only); the writer and the header-length calc must use the **identical** condition.
+- The vendored package is the **`mac80211` backports bundle**; **bump its `PKG_RELEASE` 1 → 2 once** so all its kmods (`kmod-mac80211`, `kmod-cfg80211`, `kmod-ath`, `kmod-ath9k`, `kmod-ath9k-common`, …) outrank stock and are shipped together (struct-layout/ABI consistency).
+- All Docker build runs use **`--network host`** (host resolver) and **`-e HOME=/tmp -v "$PWD:/work"`**, matching the repo's existing `build.sh`.
 - Reference spec: `docs/superpowers/specs/2026-06-26-ath9k-snr-radiotap-design.md`.
 - The wfb-ng sibling checkout is at `../wfb-ng` (consumer reference only).
 
+## Spike findings (resolved before execution — do not re-investigate)
+
+- SDK image `wfbng-sdk:25.12.4` and IB image `wfbng-ib:25.12.4` are already built locally.
+- The SDK does **not** ship `package/kernel/mac80211`, but the **exact-matching source is in the SDK at `feeds/base/kernel/mac80211`** (backports `PKG_VERSION:=6.18.26`, `PKG_RELEASE:=1`). Vendor from there — no external clone.
+- The SDK has the prepared kernel tree `build_dir/target-mips_24kc_musl/linux-ath79_generic/linux-6.12.87/` with **`Module.symvers` + `.config`** present → `make package/kernel/mac80211/compile` builds modules in the SDK. **SDK-extend confirmed; no buildroot fallback.**
+- mac80211 module builds can take several minutes — **run them with Bash `run_in_background: true` and poll**, since a foreground call may exceed the 10-min tool cap.
+
 ---
 
-## Task 1: Spike — make the SDK build the `mac80211` kmod bundle (R1 decision gate)
+## Task 1: Vendor the mac80211 source recipe and confirm the unpatched bundle builds
 
-De-risk before any patching: prove the existing SDK container can compile the `mac80211`
-bundle and emit `kmod-mac80211` / `kmod-ath9k` `.apk`s. This decides whether we proceed with
-the SDK-extend path or fall back to a full buildroot stage.
+Establish (and wire into `docker/sdk-build.sh`) the recipe that copies the SDK's own
+`mac80211` source into the package tree and compiles it, emitting `kmod-*.apk`s — unpatched.
+This proves the build path before any patching and is the foundation Task 2 patches.
 
 **Files:**
-- Inspect: `docker/Dockerfile.sdk`, `docker/sdk-build.sh`, `versions.env`
-- Possibly create: `vendor/openwrt/mac80211/` (only if the SDK does not already ship the package source)
+- Modify: `docker/sdk-build.sh` (append a mac80211 build block; guarded so it is reusable)
 
 **Interfaces:**
-- Produces: a confirmed build recipe that yields `bin/targets/.../packages/kmod-mac80211_*.apk` and `kmod-ath9k_*.apk` from the SDK container, plus a recorded decision (`SDK-builds-mac80211: yes|no`) that gates Tasks 2–3.
+- Produces: `build/packages/kmod-mac80211_*.apk`, `kmod-cfg80211_*.apk`, `kmod-ath_*.apk`, `kmod-ath9k_*.apk`, `kmod-ath9k-common_*.apk` (stock `…-r1` at this task; bumped in Task 2). A reusable build block later tasks extend with the patch + release bump.
 
-- [ ] **Step 1: Build the SDK image (if not cached)**
+- [ ] **Step 1: Confirm the source location in the SDK image (sanity, fast)**
 
 ```bash
 cd /home/gilankpam/Projects/poc/wfb-ng-openwrt
-. ./versions.env
-docker build -t "wfbng-sdk:${OPENWRT_VERSION}" \
-  --build-arg OPENWRT_VERSION="$OPENWRT_VERSION" \
-  --build-arg OPENWRT_TARGET="$OPENWRT_TARGET" \
-  --build-arg OPENWRT_SUBTARGET="$OPENWRT_SUBTARGET" \
-  -f docker/Dockerfile.sdk docker
+docker run --rm -e HOME=/tmp wfbng-sdk:25.12.4 sh -c \
+  'ls -d /opt/sdk/feeds/base/kernel/mac80211 && grep -E "^PKG_(VERSION|RELEASE):" /opt/sdk/feeds/base/kernel/mac80211/Makefile'
 ```
-Expected: image `wfbng-sdk:25.12.4` builds successfully.
+Expected: prints the dir and `PKG_VERSION:=6.18.26`, `PKG_RELEASE:=1`.
 
-- [ ] **Step 2: Check whether the SDK already ships the `mac80211` package source (the failing/branching test)**
+- [ ] **Step 2: Add the mac80211 build block to `docker/sdk-build.sh`**
+
+Append, after the existing `wfb-ng` build + copy block (keep the existing arch-check block last):
+```sh
+# --- Patched mac80211/ath9k bundle: radiotap DBM_ANTNOISE so wfb-ng reports SNR. ---
+# Source comes from the SDK's own base feed (exact 25.12.4 rev), copied into the package
+# tree so we can apply our patch and bump PKG_RELEASE. PATCH is applied only if present
+# (Task 1 builds stock; Task 2 adds the patch + the release bump).
+MAC_SRC=feeds/base/kernel/mac80211
+MAC_PKG=package/kernel/mac80211
+if [ ! -d "$MAC_PKG" ]; then cp -a "$MAC_SRC" "$MAC_PKG"; fi
+if [ -f /work/patches/mac80211/999-ath9k-radiotap-antnoise.patch ]; then
+  cp /work/patches/mac80211/999-ath9k-radiotap-antnoise.patch "$MAC_PKG/patches/subsys/"
+  sed -i 's/^PKG_RELEASE:=.*/PKG_RELEASE:=2/' "$MAC_PKG/Makefile"
+fi
+echo 'CONFIG_PACKAGE_kmod-ath9k=y' >> .config
+make defconfig
+make package/kernel/mac80211/compile -j"$(nproc)" V=s
+for k in kmod-cfg80211 kmod-mac80211 kmod-ath kmod-ath9k kmod-ath9k-common; do
+  f=$(find bin -name "${k}_*.apk" | head -n1)
+  [ -n "$f" ] || { echo "ERROR: $k apk not produced"; exit 1; }
+  cp -v "$f" /work/build/packages/
+done
+```
+
+- [ ] **Step 3: Run the package stage and confirm kmod apks appear (background build)**
+
+The compile is long; launch in the background and poll.
+```bash
+mkdir -p build/packages
+./build.sh package    # run_in_background: true
+```
+Then poll until it returns, and check:
+```bash
+ls -1 build/packages/kmod-*.apk
+```
+Expected: the five `kmod-*_*.apk` files exist (stock release, filenames contain `-r1`).
+If the compile fails, read the `V=s` tail for the real error before changing anything.
+
+- [ ] **Step 4: Commit**
 
 ```bash
-docker run --rm --network host -e HOME=/tmp -v "$PWD:/work" \
-  "wfbng-sdk:${OPENWRT_VERSION}" sh -c '
-    echo "--- package/kernel/mac80211 ---"; ls -d /opt/sdk/package/kernel/mac80211 2>/dev/null && cat /opt/sdk/package/kernel/mac80211/Makefile | grep -E "^PKG_(NAME|VERSION|RELEASE|SOURCE)" ;
-    echo "--- kernel build dir ---"; ls -d /opt/sdk/build_dir/target-*/linux-*/ 2>/dev/null | head ;
-    echo "--- target/linux ---"; ls -d /opt/sdk/target/linux/ath79 2>/dev/null'
+git add docker/sdk-build.sh
+git commit -m "build(sdk): compile mac80211/ath9k kmod bundle from base feed"
 ```
-Decision:
-- **If `package/kernel/mac80211` is present** → record `SDK-ships-mac80211: yes`; skip Step 3 (patch the SDK's own copy in later tasks).
-- **If absent** → do Step 3 to vendor it.
-
-- [ ] **Step 3 (only if absent): Vendor the matching `mac80211` package source into the repo**
-
-```bash
-# Pin the OpenWrt source ref that matches the SDK release.
-echo 'OPENWRT_SRC_REF=v25.12.4' >> versions.env   # adjust if the exact tag differs (see note)
-
-mkdir -p vendor/openwrt
-git clone --depth 1 -b v25.12.4 https://github.com/openwrt/openwrt /tmp/owrt-src
-cp -a /tmp/owrt-src/package/kernel/mac80211 vendor/openwrt/mac80211
-git add versions.env vendor/openwrt/mac80211
-```
-Note: if tag `v25.12.4` does not resolve, find the ref from the SDK itself —
-`docker run --rm wfbng-sdk:${OPENWRT_VERSION} sh -c 'cat /opt/sdk/version.buildinfo 2>/dev/null; cat /opt/sdk/.vermagic 2>/dev/null'` — and clone that revision. The only thing we need is the small `package/kernel/mac80211` directory (Makefile + `patches/` + `files/`); the backports tarball itself is fetched by the package Makefile at build time.
-
-- [ ] **Step 4: Build the bundle unpatched in the SDK (the passing test)**
-
-Run a throwaway build to prove the toolchain produces the kmods. If `SDK-ships-mac80211: yes`, build the SDK's copy directly; otherwise first copy the vendored dir into the SDK tree.
-
-```bash
-docker run --rm --network host -e HOME=/tmp -v "$PWD:/work" \
-  "wfbng-sdk:${OPENWRT_VERSION}" sh -eu -c '
-    cd /opt/sdk
-    if [ ! -d package/kernel/mac80211 ]; then
-      mkdir -p package/kernel && cp -a /work/vendor/openwrt/mac80211 package/kernel/mac80211
-    fi
-    make defconfig
-    echo "CONFIG_PACKAGE_kmod-ath9k=y" >> .config
-    echo "CONFIG_PACKAGE_kmod-mac80211=y" >> .config
-    make defconfig
-    make package/kernel/mac80211/compile -j"$(nproc)" V=s 2>&1 | tail -40
-    echo "=== produced apks ==="
-    find bin -name "kmod-mac80211_*.apk" -o -name "kmod-ath9k_*.apk"'
-```
-Expected: the `find` prints `kmod-mac80211_*.apk` and `kmod-ath9k_*.apk` paths.
-
-- [ ] **Step 5: Record the decision and commit**
-
-If Step 4 succeeded, the SDK-extend path is viable.
-
-```bash
-# Record the outcome in the plan/spec area for the next tasks.
-printf '%s\n' \
-  '# R1 outcome (Task 1)' \
-  'SDK-ships-mac80211: <yes|no>' \
-  'SDK-builds-mac80211: yes' \
-  'mac80211 source: <sdk-builtin | vendor/openwrt/mac80211 @ v25.12.4>' \
-  > docs/superpowers/plans/R1-outcome.md
-git add docs/superpowers/plans/R1-outcome.md
-[ -d vendor/openwrt/mac80211 ] && git add vendor/openwrt/mac80211 versions.env || true
-git commit -m "build: vendor+verify mac80211 kmod build in SDK (R1 spike)"
-```
-
-- [ ] **Step 6 (fallback, only if Step 4 fails): switch this task's deliverable to a buildroot stage**
-
-If `make package/kernel/mac80211/compile` cannot run in the SDK (e.g. no prepared kernel),
-do NOT proceed with SDK-extend. Instead create `docker/Dockerfile.buildroot` that clones
-OpenWrt at the pinned ref, `make defconfig` for `ath79/generic`, and builds
-`package/kernel/mac80211/compile` from the full tree; emit the same kmod apks to
-`build/packages/`. Re-run Steps 4–5 against that container. All later tasks consume the apks
-identically regardless of which stage produced them. Commit with message
-`build: add buildroot fallback stage for mac80211 kmods`.
+Expected: clean commit; `git show --stat` lists only `docker/sdk-build.sh`.
 
 ---
 
-## Task 2: Author and build the `DBM_ANTNOISE` patch
+## Task 2: Author the DBM_ANTNOISE patch and build the patched bundle
 
-Write the four-hunk patch with `quilt` against the *real* prepared source (so line numbers are
-correct), install it into the package's `patches/`, bump `PKG_RELEASE`, and rebuild from clean
-to confirm it applies and compiles.
+Author the four-hunk patch with `quilt` against the real prepared source, store it in the repo,
+let `sdk-build.sh` apply it and bump `PKG_RELEASE`, and rebuild to confirm it applies + compiles.
 
 **Files:**
-- Create: `<mac80211-pkg>/patches/ath9k/999-ath9k-radiotap-antnoise.patch`
-- Modify: `<mac80211-pkg>/Makefile` (`PKG_RELEASE`)
-- Where `<mac80211-pkg>` is `vendor/openwrt/mac80211` (if vendored) or the SDK's `package/kernel/mac80211` copied into the repo for patching. Patches edit (via quilt) the prepared backports tree: `net/mac80211/rx.c`, `include/net/mac80211.h`, `drivers/net/wireless/ath/ath9k/common.c`.
+- Create: `patches/mac80211/999-ath9k-radiotap-antnoise.patch`
+- (Task 1 already made `docker/sdk-build.sh` apply it + bump release when present.)
 
 **Interfaces:**
-- Consumes: the buildable `mac80211` package recipe from Task 1.
-- Produces: `kmod-mac80211_*.apk`, `kmod-ath9k_*.apk`, `kmod-ath9k-common_*.apk`, `kmod-ath_*.apk`, `kmod-cfg80211_*.apk` in `bin/`, all carrying the **bumped** `PKG_RELEASE`, with the radiotap noise emit compiled in.
+- Consumes: the build block from Task 1.
+- Produces: the five `kmod-*.apk`s at **`6.18.26-r2`** with the radiotap noise emit compiled in.
 
 - [ ] **Step 1: Open an interactive SDK shell and prepare the source under quilt**
 
 ```bash
 cd /home/gilankpam/Projects/poc/wfb-ng-openwrt
-. ./versions.env
-docker run --rm -it --network host -e HOME=/tmp -v "$PWD:/work" \
-  "wfbng-sdk:${OPENWRT_VERSION}" sh
-# --- inside the container ---
+docker run --rm -it --network host -e HOME=/tmp -v "$PWD:/work" wfbng-sdk:25.12.4 sh
+# --- inside ---
 cd /opt/sdk
-[ -d package/kernel/mac80211 ] || { mkdir -p package/kernel && cp -a /work/vendor/openwrt/mac80211 package/kernel/mac80211; }
+[ -d package/kernel/mac80211 ] || cp -a feeds/base/kernel/mac80211 package/kernel/mac80211
 make defconfig
 make package/kernel/mac80211/{clean,prepare} QUILT=1 V=s
-PKGDIR=$(ls -d build_dir/target-*/linux-*/backports-* 2>/dev/null | head -n1)
-echo "prepared tree: $PKGDIR"
-cd "$PKGDIR"
-quilt new ath9k/999-ath9k-radiotap-antnoise.patch
+PKGDIR=$(ls -d build_dir/target-*/linux-*/backports-* | head -n1); echo "$PKGDIR"; cd "$PKGDIR"
 ```
-Expected: `quilt new` reports the new patch is at top of series.
+Expected: `$PKGDIR` is the prepared, fully-patched backports tree (existing patches already applied).
 
-- [ ] **Step 2: Verify the stock source lacks a noise emit (the failing baseline)**
+- [ ] **Step 2: Verify stock source lacks a noise emit (failing baseline) and capture anchors**
 
 ```bash
-# still inside $PKGDIR
 grep -n "IEEE80211_RADIOTAP_DBM_ANTSIGNAL" net/mac80211/rx.c
-grep -nc "IEEE80211_RADIOTAP_DBM_ANTNOISE" net/mac80211/rx.c   # expect 0 emits (comment only)
+grep -c "IEEE80211_RADIOTAP_DBM_ANTNOISE" net/mac80211/rx.c     # expect 0 (comment only)
 grep -n "rxs->signal = ah->noise" drivers/net/wireless/ath/ath9k/common.c
-grep -n "s8 signal;" include/net/mac80211.h
+grep -n "__le8 signal\|s8 signal;" include/net/mac80211.h
 ```
-Expected: ANTSIGNAL block exists; ANTNOISE emit count is 0; the ath9k signal line and the
-`signal` struct field are found. These greps are your anchors for the edits.
+Expected: ANTSIGNAL block present; ANTNOISE emit count 0; the ath9k signal line and the
+`s8 signal;` struct field found.
 
-- [ ] **Step 3: Add the carrier field to `struct ieee80211_rx_status`**
+- [ ] **Step 3: Create the quilt patch and add the three files**
 
 ```bash
-quilt add include/net/mac80211.h
+quilt new subsys/999-ath9k-radiotap-antnoise.patch
+quilt add include/net/mac80211.h drivers/net/wireless/ath/ath9k/common.c net/mac80211/rx.c
 ```
-In `include/net/mac80211.h`, immediately after the `s8 signal;` line inside
+
+- [ ] **Step 4: Edit `include/net/mac80211.h`** — after the `s8 signal;` line in
 `struct ieee80211_rx_status`, add:
 ```c
 	s8 noise;	/* NF in dBm; 0 = not present (ath9k radiotap antnoise) */
 ```
 
-- [ ] **Step 4: Populate the field in ath9k**
-
-```bash
-quilt add drivers/net/wireless/ath/ath9k/common.c
-```
-In `ath9k_cmn_process_rssi()`, immediately after the existing
-`rxs->signal = ah->noise + rx_stats->rs_rssi;` line, add:
+- [ ] **Step 5: Edit `drivers/net/wireless/ath/ath9k/common.c`** — in
+`ath9k_cmn_process_rssi()`, immediately after `rxs->signal = ah->noise + rx_stats->rs_rssi;`, add:
 ```c
 	rxs->noise = ah->noise;
 ```
 
-- [ ] **Step 5: Emit the field in the radiotap writer and length calc**
-
-```bash
-quilt add net/mac80211/rx.c
-```
-mac80211 builds the RX radiotap header in two coordinated spots; both live in/around
-`ieee80211_add_rx_radiotap_header()`. Find the `DBM_ANTSIGNAL` writer block (from Step 2's
-grep), which looks like:
+- [ ] **Step 6: Edit `net/mac80211/rx.c`** — find the `DBM_ANTSIGNAL` writer block in
+`ieee80211_add_rx_radiotap_header()`:
 ```c
 	/* IEEE80211_RADIOTAP_DBM_ANTSIGNAL */
 	if (ieee80211_hw_check(&local->hw, SIGNAL_DBM) &&
@@ -214,7 +171,7 @@ grep), which looks like:
 		pos++;
 	}
 ```
-Immediately **after** that block (radiotap bit order: ANTSIGNAL=5, ANTNOISE=6), add:
+Immediately **after** it (radiotap bit order: ANTSIGNAL=5, ANTNOISE=6), add:
 ```c
 	/* IEEE80211_RADIOTAP_DBM_ANTNOISE */
 	if (status->noise) {
@@ -224,131 +181,110 @@ Immediately **after** that block (radiotap bit order: ANTSIGNAL=5, ANTNOISE=6), 
 		pos++;
 	}
 ```
-Then find where the header **length** reserves a byte for `DBM_ANTSIGNAL` (search the same
-file/function for the length pass — e.g. a `len += 1;` guarded by the SIGNAL_DBM check, or in
-`ieee80211_rx_radiotap_hdrlen()`), and add the matching reservation guarded by the **identical**
-`status->noise` condition:
+Then find where header **length** reserves the `DBM_ANTSIGNAL` byte (search the same file —
+likely `ieee80211_rx_radiotap_hdrlen()`, the `len += 1` under the SIGNAL_DBM guard) and add the
+matching reservation under the **identical** condition:
 ```c
 	if (status->noise)
 		len += 1;
 ```
-Lock-step invariant: the writer's `if (status->noise)` and the length's `if (status->noise)`
-must be byte-for-byte the same condition, or every monitor frame's header corrupts.
+**Lock-step invariant:** the writer's `if (status->noise)` and the length's `if (status->noise)`
+must be byte-for-byte identical, or every monitor frame's radiotap header corrupts.
 
-- [ ] **Step 6: Refresh the patch and copy it back into the repo**
+- [ ] **Step 7: Refresh, copy the patch into the repo, exit the container**
 
 ```bash
-# inside $PKGDIR
 quilt refresh
-# sanity: the diff touches exactly three files and adds the noise emit
-grep -c "DBM_ANTNOISE" patches/ath9k/999-ath9k-radiotap-antnoise.patch   # expect >= 1
-mkdir -p /work/vendor/openwrt/mac80211/patches/ath9k 2>/dev/null || true
-# copy into whichever package dir the build uses:
-cp patches/ath9k/999-ath9k-radiotap-antnoise.patch \
-   "$( [ -d /work/vendor/openwrt/mac80211 ] && echo /work/vendor/openwrt/mac80211 || echo /opt/sdk/package/kernel/mac80211 )/patches/ath9k/"
+grep -c "DBM_ANTNOISE" patches/subsys/999-ath9k-radiotap-antnoise.patch   # expect >= 1
+mkdir -p /work/patches/mac80211
+cp patches/subsys/999-ath9k-radiotap-antnoise.patch /work/patches/mac80211/
+git -C /work diff --stat --no-index /dev/null /work/patches/mac80211/999-ath9k-radiotap-antnoise.patch || true
+exit
 ```
-Expected: the `.patch` file now exists in the repo's package `patches/ath9k/` dir.
+Expected: `patches/mac80211/999-ath9k-radiotap-antnoise.patch` now exists in the repo and
+references all three files plus `DBM_ANTNOISE`.
 
-- [ ] **Step 7: Bump `PKG_RELEASE`**
+- [ ] **Step 8: Clean rebuild — confirm it applies + compiles + release is bumped (passing test)**
 
-In the package `Makefile` (`vendor/openwrt/mac80211/Makefile` or the SDK copy), increment
-`PKG_RELEASE` — append a suffix so it clearly outranks stock, e.g. change `PKG_RELEASE:=N` to:
-```make
-PKG_RELEASE:=N.wfbsnr1
+`sdk-build.sh` (from Task 1) auto-applies the patch and bumps the release when the patch file is
+present. Rebuild from clean:
+```bash
+docker run --rm --network host -e HOME=/tmp -v "$PWD:/work" wfbng-sdk:25.12.4 sh -eu -c '
+  cd /opt/sdk; rm -rf package/kernel/mac80211
+  cp -a feeds/base/kernel/mac80211 package/kernel/mac80211
+  cp /work/patches/mac80211/999-ath9k-radiotap-antnoise.patch package/kernel/mac80211/patches/subsys/
+  sed -i "s/^PKG_RELEASE:=.*/PKG_RELEASE:=2/" package/kernel/mac80211/Makefile
+  echo CONFIG_PACKAGE_kmod-ath9k=y >> .config; make defconfig
+  make package/kernel/mac80211/{clean,prepare} V=s 2>&1 | grep -iE "Applying.*999-ath9k|Patch failed" || true
+  make package/kernel/mac80211/compile -j"$(nproc)" V=s 2>&1 | tail -20
+  find bin -name "kmod-mac80211_*.apk" -o -name "kmod-ath9k_*.apk"'   # run_in_background: true
 ```
-(Use the existing numeric `N` from the file; the `.wfbsnr1` suffix makes ours sort higher than
-the stock `N`.)
+Poll to completion. Expected: log shows `Applying ... 999-ath9k-radiotap-antnoise.patch` (no
+"Patch failed"); compile succeeds; the apk filenames carry **`-r2`**.
+If the patch fails to apply, the issue is series ordering — re-author in Step 6 against the
+prepared tree (quilt context is authoritative) or rename so it sorts after conflicting patches.
 
-- [ ] **Step 8: Rebuild from clean and verify it applies + compiles (the passing test)**
+- [ ] **Step 9: Commit**
 
 ```bash
-# inside the container (or a fresh `docker run ... sh -c`)
-cd /opt/sdk
-[ -d package/kernel/mac80211 ] || cp -a /work/vendor/openwrt/mac80211 package/kernel/mac80211
-make package/kernel/mac80211/{clean,prepare} QUILT=0 V=s 2>&1 | grep -iE "Applying|999-ath9k-radiotap" 
-make package/kernel/mac80211/compile -j"$(nproc)" V=s 2>&1 | tail -30
-echo "=== apks (note the bumped release) ==="
-find bin -name "kmod-mac80211_*.apk" -o -name "kmod-ath9k*_*.apk" -o -name "kmod-cfg80211_*.apk" -o -name "kmod-ath_*.apk"
+git add patches/mac80211/999-ath9k-radiotap-antnoise.patch
+git commit -m "feat: ath9k radiotap DBM_ANTNOISE patch (real ah->noise -> wfb-ng SNR)"
 ```
-Expected: log shows `999-ath9k-radiotap-antnoise.patch` applying; compile succeeds; the apks
-are present and their filenames contain the bumped release (`...wfbsnr1...`).
-
-- [ ] **Step 9: Wire the kmod build into `docker/sdk-build.sh` and commit**
-
-Edit `docker/sdk-build.sh` so the non-interactive package stage also builds the bundle and
-copies the kmod apks next to `wfb-ng`. After the existing `wfb-ng` build block, add:
-```sh
-# Build the patched mac80211/ath9k bundle (radiotap DBM_ANTNOISE for wfb-ng SNR).
-[ -d package/kernel/mac80211 ] || cp -a /work/vendor/openwrt/mac80211 package/kernel/mac80211
-echo 'CONFIG_PACKAGE_kmod-ath9k=y' >> .config
-make defconfig
-make package/kernel/mac80211/compile -j"$(nproc)" V=s
-for k in kmod-cfg80211 kmod-mac80211 kmod-ath kmod-ath9k kmod-ath9k-common; do
-  f=$(find bin -name "${k}_*.apk" | head -n1)
-  [ -n "$f" ] && cp -v "$f" /work/build/packages/ || { echo "ERROR: $k apk missing"; exit 1; }
-done
-```
-Then:
-```bash
-git add docker/sdk-build.sh vendor/openwrt/mac80211/patches/ath9k/999-ath9k-radiotap-antnoise.patch vendor/openwrt/mac80211/Makefile
-git commit -m "feat: ath9k radiotap DBM_ANTNOISE patch + SDK kmod build"
-```
-Expected: clean commit; `git show --stat` lists the patch, the Makefile bump, and the sdk-build.sh change.
 
 ---
 
 ## Task 3: Make ImageBuilder install our kmods and build the images
 
-Have the ImageBuilder pick our higher-release kmods over stock, build all three CPE510 images,
-and assert both the override and the size budget.
+Have the ImageBuilder pick our `-r2` kmods over stock, build all three CPE510 images, and assert
+both the override and the size budget.
 
 **Files:**
 - Modify: `docker/ib-build.sh`
 
 **Interfaces:**
-- Consumes: the kmod apks in `build/packages/` from Task 2.
+- Consumes: the `kmod-*.apk`s (`-r2`) in `build/packages/` from Task 2.
 - Produces: `output/*cpe510*sysupgrade.bin` / `*factory.bin` for v1/v2/v3, built against our
-  `kmod-mac80211`/`kmod-ath9k`, each within `7680k`.
+  `kmod-mac80211`/`kmod-ath9k`, each ≤ 7864320 bytes.
 
 - [ ] **Step 1: Copy our kmod apks into the ImageBuilder's local repo**
 
-In `docker/ib-build.sh`, alongside the existing `cp /work/build/packages/wfb-ng-*.apk packages/`,
+In `docker/ib-build.sh`, next to the existing `cp /work/build/packages/wfb-ng-*.apk packages/`,
 add (before the per-profile `make image` loop):
 ```sh
-# Our patched mac80211/ath9k kmods (higher PKG_RELEASE) override the stock ones.
+# Our patched mac80211/ath9k kmods (PKG_RELEASE=2) override the stock -r1 ones.
 cp /work/build/packages/kmod-*.apk packages/
 ```
 
-- [ ] **Step 2: Assert the IB resolves OUR kmod versions (the test)**
+- [ ] **Step 2: Assert the IB resolves OUR kmod version (test)**
 
-Add, inside the `for p in $PROFILES` loop after `make image ...`, a check that the manifest
-lists our release suffix:
+Inside the `for p in $PROFILES` loop, after `make image ...`, add:
 ```sh
   man=$(find bin -name "*${p}*.manifest" | head -n1)
   if [ -n "$man" ]; then
     grep -E '^kmod-mac80211 ' "$man" || true
-    grep -Eq 'kmod-mac80211 .*wfbsnr' "$man" || { echo "ERROR: stock kmod-mac80211 used for $p"; exit 1; }
+    grep -Eq '^kmod-mac80211 .*-r2' "$man" || { echo "ERROR: stock kmod-mac80211 used for $p"; exit 1; }
   fi
 ```
+Note: confirm the exact manifest version token against a real build (apk renders
+`PKG_VERSION-rPKG_RELEASE`, i.e. `6.18.26-r2`); adjust the grep if the format differs.
 
-- [ ] **Step 3: Run the full build**
+- [ ] **Step 3: Run the full build (background)**
 
 ```bash
 cd /home/gilankpam/Projects/poc/wfb-ng-openwrt
-./build.sh package   # SDK: wfb-ng + patched kmods -> build/packages/
-./build.sh image     # ImageBuilder: assemble images -> output/
+./build.sh package    # run_in_background: true — SDK: wfb-ng + patched -r2 kmods
+# poll to completion, then:
+./build.sh image      # run_in_background: true — ImageBuilder: assemble images
 ```
-Expected: `package` produces `wfb-ng-*.apk` and `kmod-mac80211_*wfbsnr1*.apk` etc. in
-`build/packages/`; `image` prints the per-image size lines and `OK: all images within size
-budget`, and the new manifest assertion passes for all three profiles.
+Expected: `package` puts `wfb-ng-*.apk` and `kmod-*_*-r2_*.apk` in `build/packages/`; `image`
+prints the size lines, `OK: all images within size budget`, and the manifest assertion passes
+for all three profiles.
 
-- [ ] **Step 4: Confirm outputs and size budget**
+- [ ] **Step 4: Confirm outputs and budget**
 
 ```bash
 ls -lh output/
-for f in output/*sysupgrade.bin; do
-  echo "$f: $(wc -c < "$f") bytes (max $((7680*1024)))"
-done
+for f in output/*sysupgrade.bin; do echo "$f: $(wc -c < "$f") bytes (max 7864320)"; done
 ```
 Expected: three `sysupgrade.bin` (+ factory) images, each ≤ 7864320 bytes.
 
@@ -356,26 +292,25 @@ Expected: three `sysupgrade.bin` (+ factory) images, each ≤ 7864320 bytes.
 
 ```bash
 git add docker/ib-build.sh
-git commit -m "build: ImageBuilder installs patched mac80211 kmods + asserts override"
+git commit -m "build(ib): install patched mac80211 kmods + assert override"
 ```
 
 ---
 
 ## Task 4: On-device verification (operator-run)
 
-Functional proof requires hardware, which can't be done from the build host. This task is a
-documented procedure the operator runs; it is the acceptance gate.
+Functional proof requires hardware, which can't be done from the build host. This task delivers
+the runbook; the operator runs it as the acceptance gate.
 
 **Files:**
-- Create: `docs/verify-snr-on-device.md` (the runbook below)
+- Create: `docs/verify-snr-on-device.md`
 
 **Interfaces:**
-- Consumes: an `output/*cpe510*sysupgrade.bin` from Task 3 and a CPE510 + a wifibroadcast TX source.
+- Consumes: an `output/*cpe510*sysupgrade.bin` from Task 3 + a CPE510 + a wifibroadcast TX source.
 - Produces: a recorded PASS/FAIL of live SNR.
 
-- [ ] **Step 1: Write the verification runbook**
+- [ ] **Step 1: Write `docs/verify-snr-on-device.md`**
 
-Create `docs/verify-snr-on-device.md` with:
 ```markdown
 # Verify ath9k SNR on the CPE510
 
@@ -385,26 +320,26 @@ Flash `output/<rev>/...-cpe510-vX-...-sysupgrade.bin` (sysupgrade or TFTP recove
 ## 2. Driver + module sanity
 SSH/serial to the device:
 - `dmesg | grep -i ath9k` — no vermagic/load errors.
-- `iw dev` / `iw phy` — phy present.
-- `cat /sys/module/mac80211/srcversion` and compare to the built module's `modinfo`
-  srcversion to confirm OUR module loaded (optional but conclusive).
+- `iw phy` / `iw dev` — phy present.
+- Optional, conclusive: compare `modinfo mac80211 | grep srcversion` against the built
+  module to confirm OUR `-r2` module loaded.
 
 ## 3. Radiotap mechanism check (proves the field is emitted)
 With the monitor interface up (the wfb-ng launcher creates it):
-- `tcpdump -i <mon> -e -c 20 -y IEEE802_11_RADIO` — confirm frames show a noise figure, or
-- capture to pcap and open in tshark/Wireshark: field `radiotap.dbm_antnoise` is **present**
-  and sane (≈ -90…-105 dBm); `radiotap.dbm_antsignal` tracks the link.
+- `tcpdump -i <mon> -e -c 20 -y IEEE802_11_RADIO` — frames show a noise figure, or
+- capture to pcap + open in tshark/Wireshark: `radiotap.dbm_antnoise` is **present** and sane
+  (≈ -90…-105 dBm); `radiotap.dbm_antsignal` tracks the link.
 
 ## 4. Acceptance — live SNR
 With a wifibroadcast TX transmitting on the configured channel, run the device's `wfb_rx`
-the way the firmware launcher does, and read its stats on the operator host (wfb-cli or the
-raw stats stream). Confirm the `RX_ANT` line's SNR triplet `snr_min:snr_avg:snr_max` is
-**non-zero and stable**, and that `snr_avg ≈ rssi_avg − noise`.
+as the firmware launcher does, and read its stats on the operator host (wfb-cli or the raw
+stats stream). Confirm the `RX_ANT` line's SNR triplet `snr_min:snr_avg:snr_max` is **non-zero
+and stable**, and `snr_avg ≈ rssi_avg − noise`.
 
 PASS = non-zero, physically sane SNR on a live link.
 ```
 
-- [ ] **Step 2: Commit the runbook**
+- [ ] **Step 2: Commit**
 
 ```bash
 git add docs/verify-snr-on-device.md
@@ -413,34 +348,31 @@ git commit -m "docs: on-device SNR verification runbook"
 
 - [ ] **Step 3: Operator runs the runbook and records the result**
 
-Run `docs/verify-snr-on-device.md` end to end on real hardware. If SNR stays `0`:
-- re-check Step 5 of Task 2 (writer vs length lock-step) — a mismatch breaks the header;
-- confirm the loaded module is ours (Task 4 Step 2);
-- capture a pcap and inspect `radiotap.present` bit 6 to see whether the field is emitted at all.
+If SNR stays `0`: re-check Task 2 Step 6 (writer vs length lock-step — a mismatch breaks the
+header); confirm the loaded module is ours (§2); capture a pcap and inspect `radiotap.present`
+bit 6 to see whether the field is emitted at all.
 
 ---
 
 ## Self-Review
 
 **Spec coverage:**
-- Spec §3 hunk (1) struct field → Task 2 Step 3. ✓
-- Spec §3 hunk (2) ath9k populate → Task 2 Step 4. ✓
-- Spec §3 hunks (3)(4) writer + length lock-step → Task 2 Step 5. ✓
-- Spec §3 sentinel gating → Task 2 Step 5 (`if (status->noise)`) + Global Constraints. ✓
-- Spec §4 vendor + PKG_RELEASE bump + SDK build + IB override → Tasks 1–3. ✓
-- Spec §5 R1 spike + buildroot fallback → Task 1 (Steps 2, 6). ✓
-- Spec §5 ABI (whole bundle rebuilt/shipped) → Task 2 Step 9 copies all five kmods; Task 3 installs them. ✓
-- Spec §5 R2 override-takes-effect → Task 3 Step 2 manifest assertion. ✓
-- Spec §5 R3 size budget → Task 3 Step 4. ✓
-- Spec §6 verification ladder (build→image→device→mechanism→acceptance) → Tasks 2–4. ✓
-- Spec §1/§6 acceptance = live `RX_ANT` SNR host-side → Task 4. ✓
+- §3 hunk (1) struct field → Task 2 Step 4. ✓
+- §3 hunk (2) ath9k populate → Task 2 Step 5. ✓
+- §3 hunks (3)(4) writer + length lock-step → Task 2 Step 6. ✓
+- §3 sentinel gating `status->noise != 0` → Task 2 Step 6 + Global Constraints. ✓
+- §4 vendor (from SDK base feed) + PKG_RELEASE bump + SDK build + IB override → Tasks 1–3. ✓
+- §5 ABI whole-bundle ship → Task 1/2 copy all five kmods; Task 3 installs them. ✓
+- §5 R1 (SDK builds mac80211) → resolved in Spike findings (Module.symvers present); no fallback needed. ✓
+- §5 R2 override-takes-effect → Task 3 Step 2 manifest assertion. ✓
+- §5 R3 size budget → Task 3 Step 4. ✓
+- §6 verification ladder (build→image→device→mechanism→acceptance) → Tasks 1–4. ✓
+- §1/§6 acceptance = live `RX_ANT` SNR host-side → Task 4. ✓
 
-**Placeholder scan:** No "TBD"/"handle edge cases" — every code edit shows the exact C; the only
-deferred specifics are real source line numbers, which `quilt` resolves against live source by
-design (Task 2 Steps 2–6), not guesses.
+**Placeholder scan:** No "TBD"/"handle edge cases"; every code edit shows exact C. Real source
+line numbers are resolved by `quilt` against live source by design (Task 2 Steps 2–7), not guessed.
 
-**Type consistency:** Carrier field named `noise` (`s8`) everywhere — defined in `mac80211.h`
-(Task 2 Step 3), set in `common.c` as `rxs->noise = ah->noise` (Step 4), read in `rx.c` as
-`status->noise` (Step 5). Gate condition `status->noise` identical in writer and length (Step 5).
-PKG_RELEASE suffix `wfbsnr1` is the same token asserted in the IB manifest grep (Task 3 Step 2).
-Consistent.
+**Type consistency:** Carrier field `noise` (`s8`) — defined in `mac80211.h` (T2 S4), set
+`rxs->noise = ah->noise` in `common.c` (T2 S5), read `status->noise` in `rx.c` (T2 S6), identical
+gate in writer and length (T2 S6). Release token `-r2` is the same token asserted in the IB
+manifest grep (T3 S2). Consistent.
