@@ -21,6 +21,16 @@ setup() {
 teardown() { rm -rf "$TMP"; }
 assert_log() { if grep -q -- "$1" "$LOG"; then echo "ok - $2"; else echo "NOT ok - $2 (missing: $1)"; fail=1; fi; }
 refute_log() { if grep -q -- "$1" "$LOG"; then echo "NOT ok - $2 (present: $1)"; fail=1; else echo "ok - $2"; fi; }
+# wfb_rx/wfb_tx are launched in the background by the launcher, so their stub
+# log lines may land after `start` returns. Poll (up to ~3s) instead of racing.
+wait_log() {
+  i=0
+  while [ "$i" -lt 30 ]; do
+    if grep -q -- "$1" "$LOG"; then echo "ok - $2"; return; fi
+    i=$((i + 1)); sleep 0.1
+  done
+  echo "NOT ok - $2 (missing after wait: $1)"; fail=1
+}
 
 # Test 1: RX-only start builds the expected commands
 setup
@@ -39,7 +49,7 @@ sh "$LAUNCHER" start
 assert_log "iw reg set US" "reg domain set"
 assert_log "iw phy phy0 interface add mon0 type monitor" "monitor vif created"
 assert_log "set channel 149 HT20" "channel/bandwidth set"
-assert_log "wfb_rx .*-p 0 .*-i 7 .*-c 192.168.1.10 .*-u 5600 .*-K /etc/gs.key .*mon0" "wfb_rx command line"
+wait_log "wfb_rx .*-p 0 .*-i 7 .*-c 192.168.1.10 .*-u 5600 .*-K /etc/gs.key .*mon0" "wfb_rx command line"
 refute_log "^wfb_tx " "wfb_tx not started when TX disabled"
 teardown
 
@@ -53,7 +63,7 @@ TX_RADIO_PORT=1
 TX_UDP_PORT=5601
 EOF
 sh "$LAUNCHER" start
-assert_log "wfb_tx .*-p 1 .*-i 7 .*-u 5601 .*-K /etc/gs.key .*mon0" "wfb_tx command line"
+wait_log "wfb_tx .*-p 1 .*-i 7 .*-u 5601 .*-K /etc/gs.key .*mon0" "wfb_tx command line"
 teardown
 
 # Test 3: stop kills tracked process and tears down the monitor vif
@@ -63,6 +73,15 @@ sleep 30 & FAKE=$!; echo "$FAKE" > "$WFB_RUN_DIR/wfb_rx.pid"
 sh "$LAUNCHER" stop
 if kill -0 "$FAKE" 2>/dev/null; then echo "NOT ok - stop did not kill rx"; fail=1; kill "$FAKE" 2>/dev/null; else echo "ok - stop killed rx"; fi
 assert_log "iw dev mon0 del" "monitor vif removed on stop"
+teardown
+
+# Test 4: start refuses when already running (re-entrancy guard)
+setup
+: > "$WFB_CONF"
+sleep 30 & FAKE=$!; echo "$FAKE" > "$WFB_RUN_DIR/wfb_rx.pid"
+out=$(sh "$LAUNCHER" start 2>&1) || true
+if printf '%s' "$out" | grep -q "already running"; then echo "ok - start refused while running"; else echo "NOT ok - start not refused (got: $out)"; fail=1; fi
+kill "$FAKE" 2>/dev/null
 teardown
 
 [ "$fail" -eq 0 ] && echo "ALL PASS" || { echo "FAILURES"; exit 1; }

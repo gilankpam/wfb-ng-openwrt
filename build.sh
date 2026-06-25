@@ -30,6 +30,11 @@ build_ib_image() {
     -f docker/Dockerfile.imagebuilder docker
 }
 
+cmd_test() {
+  echo "=== launcher tests ==="
+  sh feed/net/wfb-ng/tests/test_launcher.sh
+}
+
 cmd_package() {
   build_sdk_image
   mkdir -p build/packages
@@ -42,7 +47,7 @@ cmd_image() {
   build_ib_image
   ls build/packages/wfb-ng-*.apk >/dev/null 2>&1 || { echo "Run './build.sh package' first."; exit 1; }
   rm -rf build/overlay && mkdir -p build/overlay/etc
-  [ -d files ] && cp -a files/. build/overlay/ 2>/dev/null || true
+  if [ -d files ]; then cp -a files/. build/overlay/; fi
   rm -f build/overlay/.gitkeep
   cp keys/gs.key build/overlay/etc/gs.key
   mkdir -p output
@@ -53,8 +58,9 @@ cmd_image() {
 }
 
 case "${1:-all}" in
+  test)    cmd_test ;;
   package) cmd_package ;;
   image)   cmd_image ;;
-  all)     cmd_package; cmd_image ;;
-  *) echo "usage: $0 {package|image|all}" >&2; exit 1 ;;
+  all)     cmd_test; cmd_package; cmd_image ;;
+  *) echo "usage: $0 {test|package|image|all}" >&2; exit 1 ;;
 esac

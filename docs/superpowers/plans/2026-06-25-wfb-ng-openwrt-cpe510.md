@@ -66,7 +66,7 @@ controller-led (the apk path was exploratory and needed live iteration), and the
 | `build.sh` | Orchestrator: builds Docker images, runs package + image stages. |
 | `docker/Dockerfile.sdk` | Debian image with the pinned OpenWrt SDK + `packages` feed + qemu. |
 | `docker/Dockerfile.imagebuilder` | Debian image with the pinned OpenWrt ImageBuilder. |
-| `docker/sdk-build.sh` | Runs inside SDK container: compile `wfb-ng` `.ipk`, arch-check. |
+| `docker/sdk-build.sh` | Runs inside SDK container: compile `wfb-ng` `.apk`, arch-check. (apk on 25.12 — see addendum) |
 | `docker/sdk-fectest.sh` | Runs inside SDK container: cross-build + qemu-run the swfec self-test. |
 | `docker/ib-build.sh` | Runs inside ImageBuilder container: assemble per-variant images + size assert. |
 | `feed/net/wfb-ng/Makefile` | OpenWrt package: build `wfb_rx`/`wfb_tx` from the fork, install launcher/conf. |

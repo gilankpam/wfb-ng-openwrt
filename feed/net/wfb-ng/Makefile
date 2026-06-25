@@ -13,6 +13,8 @@ PKG_SOURCE_PROTO:=git
 PKG_SOURCE_URL:=$(WFB_REPO)
 PKG_SOURCE_VERSION:=$(WFB_COMMIT)
 PKG_SOURCE:=$(PKG_NAME)-$(PKG_VERSION)-$(PKG_SOURCE_VERSION).tar.gz
+# Content is pinned by the full commit SHA above; the fork branch is mutable, so
+# we skip the tarball mirror hash. Replace with a real mkhash for a frozen release.
 PKG_MIRROR_HASH:=skip
 
 PKG_LICENSE:=GPL-3.0-only

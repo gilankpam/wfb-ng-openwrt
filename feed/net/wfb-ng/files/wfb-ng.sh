@@ -30,7 +30,10 @@ TX_PID="$WFB_RUN_DIR/wfb_tx.pid"
 
 setup_mon() {
     iw dev "$MON" del 2>/dev/null
-    iw phy "$PHY" interface add "$MON" type monitor || return 1
+    # 'otherbss' lets monitor mode receive frames not addressed to a local BSS,
+    # which wfb-ng's injected traffic is. Fall back if this iw rejects flags-at-add.
+    iw phy "$PHY" interface add "$MON" type monitor flags otherbss 2>/dev/null \
+        || iw phy "$PHY" interface add "$MON" type monitor || return 1
     ip link set "$MON" up || return 1
     iw reg set "$REG"
     iw dev "$MON" set channel "$CHANNEL" "$BW" || return 1
@@ -39,6 +42,10 @@ setup_mon() {
 }
 
 start() {
+    if [ -f "$RX_PID" ] && kill -0 "$(cat "$RX_PID" 2>/dev/null)" 2>/dev/null; then
+        echo "wfb-ng: already running (use restart)" >&2
+        exit 1
+    fi
     mkdir -p "$WFB_RUN_DIR"
     setup_mon || { echo "wfb-ng: monitor setup failed" >&2; exit 1; }
     wfb_rx -p "$RX_RADIO_PORT" -i "$LINK_ID" -c "$HOST_ADDR" -u "$RX_UDP_PORT" -K "$KEY" $RX_EXTRA_ARGS "$MON" &
