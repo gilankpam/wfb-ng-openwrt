@@ -19,11 +19,11 @@ for p in $PROFILES; do
   make image PROFILE="$p" PACKAGES="$PACKAGES" FILES=/work/build/overlay ADD_LOCAL_KEY=1
   # Assert the image installed OUR patched kmod-mac80211 (-r2), not the stock -r1.
   man=$(find bin -name "*${p}*.manifest" | head -n1)
-  if [ -n "$man" ]; then
-    echo "--- $p wireless kmods ---"; grep -E '^kmod-(mac80211|ath9k|ath|cfg80211)' "$man" || true
-    awk '$1=="kmod-mac80211"{print; if ($0 ~ /-r2/) ok=1} END{exit !ok}' "$man" \
-      || { echo "ERROR: $p did not install our -r2 kmod-mac80211"; exit 1; }
-  fi
+  [ -n "$man" ] || { echo "ERROR: no manifest for $p - cannot verify kmod override"; exit 1; }
+  echo "--- $p wireless kmods ---"; grep -E '^kmod-(mac80211|ath9k|ath|cfg80211)' "$man" || true
+  # Fail if any kmod-mac80211 line is not our -r2 (catches a stock -r1 slipping in).
+  awk '$1=="kmod-mac80211"{if ($0 ~ /-r2/) ok=1; else bad=1} END{exit !(ok && !bad)}' "$man" \
+    || { echo "ERROR: $p kmod-mac80211 is not our -r2 build"; exit 1; }
 done
 
 mkdir -p /work/output
