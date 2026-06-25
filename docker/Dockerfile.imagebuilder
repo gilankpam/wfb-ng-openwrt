@@ -1,0 +1,27 @@
+FROM debian:bookworm-slim
+ARG OPENWRT_VERSION
+ARG OPENWRT_TARGET
+ARG OPENWRT_SUBTARGET
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential libncurses-dev zlib1g-dev gawk gettext xz-utils zstd \
+      wget file python3 python3-distutils unzip rsync ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /opt
+RUN set -eu; \
+    BASE="https://downloads.openwrt.org/releases/${OPENWRT_VERSION}/targets/${OPENWRT_TARGET}/${OPENWRT_SUBTARGET}"; \
+    wget -q "$BASE/sha256sums" -O sha256sums; \
+    IB=$(grep -oE 'openwrt-imagebuilder-[^*[:space:]]+\.tar\.(xz|zst)' sha256sums | head -n1); \
+    echo "Downloading $IB"; \
+    wget -q "$BASE/$IB" -O "/opt/$IB"; \
+    mkdir -p /opt/ib; \
+    case "$IB" in \
+      *.zst) zstd -d -c "/opt/$IB" | tar -x -C /opt/ib --strip-components=1 ;; \
+      *.xz)  tar -xJf "/opt/$IB" -C /opt/ib --strip-components=1 ;; \
+    esac; \
+    rm -f "/opt/$IB"; \
+    chmod -R a+rwX /opt/ib
+
+WORKDIR /opt/ib

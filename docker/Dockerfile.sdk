@@ -1,0 +1,35 @@
+FROM debian:bookworm-slim
+ARG OPENWRT_VERSION
+ARG OPENWRT_TARGET
+ARG OPENWRT_SUBTARGET
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
+      gettext git libncurses-dev libssl-dev python3 python3-setuptools \
+      rsync swig unzip zlib1g-dev file wget ca-certificates \
+      xz-utils zstd qemu-user-static \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /opt
+RUN set -eu; \
+    BASE="https://downloads.openwrt.org/releases/${OPENWRT_VERSION}/targets/${OPENWRT_TARGET}/${OPENWRT_SUBTARGET}"; \
+    wget -q "$BASE/sha256sums" -O sha256sums; \
+    SDK=$(grep -oE 'openwrt-sdk-[^*[:space:]]+\.tar\.(xz|zst)' sha256sums | head -n1); \
+    echo "Downloading $SDK"; \
+    wget -q "$BASE/$SDK" -O "/opt/$SDK"; \
+    mkdir -p /opt/sdk; \
+    case "$SDK" in \
+      *.zst) zstd -d -c "/opt/$SDK" | tar -x -C /opt/sdk --strip-components=1 ;; \
+      *.xz)  tar -xJf "/opt/$SDK" -C /opt/sdk --strip-components=1 ;; \
+    esac; \
+    rm -f "/opt/$SDK"
+
+WORKDIR /opt/sdk
+# Bake the (slow) feed clones into the image so per-build runs are fast. Kept as
+# separate layers so one flaky clone doesn't force re-fetching the other.
+#  - packages: community feed (provides libsodium)
+#  - base:     OpenWrt core packages (provides libpcap)
+RUN cp feeds.conf.default feeds.conf && ./scripts/feeds update packages
+RUN ./scripts/feeds update base
+RUN chmod -R a+rwX /opt/sdk
