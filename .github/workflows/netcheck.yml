@@ -1,0 +1,17 @@
+name: netcheck
+on: workflow_dispatch
+
+jobs:
+  net:
+    runs-on: ubuntu-latest
+    steps:
+      - name: probe egress (host vs docker-run container)
+        env:
+          HOSTS: "downloads.openwrt.org sources.cdn.openwrt.org sources.openwrt.org git.openwrt.org download.libsodium.org github.com codeload.github.com registry-1.docker.io"
+        run: |
+          echo "## proxy env"; env | grep -iE 'proxy' || echo "(none)"
+          echo "## HOST egress"
+          for h in $HOSTS; do c=$(curl -sS -m 12 -o /dev/null -w '%{http_code}' "https://$h" 2>/dev/null || echo ERR); echo "host  $h -> $c"; done
+          echo "## CONTAINER egress (docker run --network host)"
+          docker run --rm --network host -e HOSTS="$HOSTS" --entrypoint sh curlimages/curl:latest -c '
+            for h in $HOSTS; do c=$(curl -sS -m 12 -o /dev/null -w "%{http_code}" "https://$h" 2>/dev/null || echo ERR); echo "ctr   $h -> $c"; done'
