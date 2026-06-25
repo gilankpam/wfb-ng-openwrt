@@ -11,10 +11,19 @@ cd /opt/ib
 
 mkdir -p packages
 cp /work/build/packages/wfb-ng-*.apk packages/
+# Our patched mac80211/ath9k kmods (PKG_RELEASE=2) override the stock -r1 ones.
+cp /work/build/packages/kmod-*.apk packages/
 
 for p in $PROFILES; do
   echo "=== building image for $p ==="
   make image PROFILE="$p" PACKAGES="$PACKAGES" FILES=/work/build/overlay ADD_LOCAL_KEY=1
+  # Assert the image installed OUR patched kmod-mac80211 (-r2), not the stock -r1.
+  man=$(find bin -name "*${p}*.manifest" | head -n1)
+  if [ -n "$man" ]; then
+    echo "--- $p wireless kmods ---"; grep -E '^kmod-(mac80211|ath9k|ath|cfg80211)' "$man" || true
+    awk '$1=="kmod-mac80211"{print; if ($0 ~ /-r2/) ok=1} END{exit !ok}' "$man" \
+      || { echo "ERROR: $p did not install our -r2 kmod-mac80211"; exit 1; }
+  fi
 done
 
 mkdir -p /work/output
