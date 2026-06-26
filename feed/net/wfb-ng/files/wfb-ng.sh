@@ -40,7 +40,9 @@ setup_mon() {
     ip link set "$MON" up || return 1
     iw reg set "$REG"
     iw dev "$MON" set channel "$CHANNEL" "$BW" || return 1
-    [ -n "$TXPOWER" ] && iw dev "$MON" set txpower fixed "$TXPOWER"
+    # Set TX power on the phy, not the monitor vif: `iw dev <mon> set txpower`
+    # returns -122 (EOPNOTSUPP) on the AR9344, so it must go through the phy.
+    [ -n "$TXPOWER" ] && iw phy "$PHY" set txpower fixed "$TXPOWER"
     return 0
 }
 

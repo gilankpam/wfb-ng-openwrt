@@ -1,0 +1,59 @@
+ath9k/mac80211: honor user-set TX power up to the silicon limit (safe by default)
+
+Make an explicit iw txpower request win over the calibrated channel max in
+mac80211 (main.c/iface.c). In ath9k ar9003, when the requested power
+(regulatory->power_limit) exceeds the calibrated ceiling, drive every rate at
+that limit up to MAX_RATE_POWER (31.5 dBm); the < MAX_COMBINED_POWER guard skips
+the boot/reset sentinel so unset/auto power is unchanged. The cal-derived
+channel-max writeback is test-only, so the advertised default stays calibrated.
+ar9003 hw.c apply_txpower is rewritten by stock patches 356/365, so the override
+reads regulatory->power_limit directly instead of touching that function.
+CPE510 (AR9344) firmware.
+
+--- a/net/mac80211/main.c
++++ b/net/mac80211/main.c
+@@ -168,7 +168,7 @@
+ 
+ 	power = ieee80211_chandef_max_power(&chandef);
+ 	if (local->user_power_level != IEEE80211_UNSET_POWER_LEVEL)
+-		power = min(local->user_power_level, power);
++		power = local->user_power_level;
+ 
+ 	rcu_read_lock();
+ 	list_for_each_entry_rcu(sdata, &local->interfaces, list) {
+--- a/net/mac80211/iface.c
++++ b/net/mac80211/iface.c
+@@ -60,7 +60,7 @@
+ 	rcu_read_unlock();
+ 
+ 	if (link->user_power_level != IEEE80211_UNSET_POWER_LEVEL)
+-		power = min(power, link->user_power_level);
++		power = link->user_power_level;
+ 
+ 	if (link->ap_power_level != IEEE80211_UNSET_POWER_LEVEL)
+ 		power = min(power, link->ap_power_level);
+--- a/drivers/net/wireless/ath/ath9k/ar9003_eeprom.c
++++ b/drivers/net/wireless/ath/ath9k/ar9003_eeprom.c
+@@ -5521,6 +5521,22 @@
+ 	if (test)
+ 		return;
+ 
++	/* TX-power uncap: when the operator explicitly requests more than the
++	 * calibrated ceiling, drive every rate at the requested limit, capped at
++	 * the 6-bit register max (MAX_RATE_POWER = 31.5 dBm). regulatory->power_limit
++	 * holds the mac80211-requested value; the < MAX_COMBINED_POWER guard skips
++	 * the boot/reset sentinel so unset/auto stays calibrated. max_power_level is
++	 * updated so `iw ... info` reflects it (the channel->max_power writeback in
++	 * ath9k_hw_set_txpowerlimit() is test-only, so the default is unchanged). */
++	if (regulatory->power_limit < MAX_COMBINED_POWER &&
++	    regulatory->power_limit > regulatory->max_power_level) {
++		u8 pwr = min_t(u8, regulatory->power_limit, MAX_RATE_POWER);
++
++		for (i = 0; i < ar9300RateSize; i++)
++			targetPowerValT2[i] = pwr;
++		regulatory->max_power_level = pwr;
++	}
++
+ 	for (i = 0; i < ar9300RateSize; i++) {
+ 		ath_dbg(common, REGULATORY, "TPC[%02d] 0x%08x\n",
+ 			i, targetPowerValT2[i]);
