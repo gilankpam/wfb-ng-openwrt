@@ -123,7 +123,17 @@ case "${1:-}" in
     # mon-up/mon-down let the procd init script reuse the monitor-vif setup
     # (channel/reg/txpower) without duplicating it; procd supervises the
     # wfb_rx/wfb_tx instances itself.
-    mon-up) setup_mon || { echo "wfb-ng: monitor setup failed" >&2; exit 1; }; echo "wfb-ng: $MON up" ;;
+    mon-up)
+        # Idempotent: if the vif already exists, leave it alone. A redundant
+        # init-script `start` would otherwise del+recreate mon0 underneath the
+        # running wfb_rx/wfb_tx instances (brief vif churn).
+        if iw dev "$MON" info >/dev/null 2>&1; then
+            echo "wfb-ng: $MON already up"
+        else
+            setup_mon || { echo "wfb-ng: monitor setup failed" >&2; exit 1; }
+            echo "wfb-ng: $MON up"
+        fi
+        ;;
     mon-down) iw dev "$MON" del 2>/dev/null; echo "wfb-ng: $MON down" ;;
     *) echo "usage: $0 {start|stop|restart|status|mon-up|mon-down}" >&2; exit 1 ;;
 esac

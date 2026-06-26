@@ -91,4 +91,25 @@ if printf '%s' "$out" | grep -q "already running"; then echo "ok - start refused
 kill "$FAKE" 2>/dev/null
 teardown
 
+# Test 5: mon-up creates the vif when mon0 is absent
+setup
+: > "$WFB_CONF"
+# iw stub: `dev mon0 info` fails (vif absent), everything else succeeds.
+printf '#!/bin/sh\necho "iw $*" >> "%s"\ncase "$*" in "dev mon0 info") exit 1;; esac\nexit 0\n' "$LOG" > "$BIN/iw"
+out=$(sh "$LAUNCHER" mon-up)
+assert_log "iw phy phy0 interface add mon0 type monitor" "mon-up creates vif when absent"
+printf '%s' "$out" | grep -q "mon0 up" && echo "ok - reports 'mon0 up'" || { echo "NOT ok - missing 'mon0 up' (got: $out)"; fail=1; }
+teardown
+
+# Test 6: mon-up is idempotent -- skips setup when mon0 already exists
+setup
+: > "$WFB_CONF"
+# iw stub: `dev mon0 info` succeeds (vif present).
+printf '#!/bin/sh\necho "iw $*" >> "%s"\nexit 0\n' "$LOG" > "$BIN/iw"
+out=$(sh "$LAUNCHER" mon-up)
+refute_log "interface add mon0" "mon-up does NOT recreate an existing vif"
+refute_log "iw dev mon0 del" "mon-up does NOT delete an existing vif"
+printf '%s' "$out" | grep -q "already up" && echo "ok - reports 'already up'" || { echo "NOT ok - missing 'already up' (got: $out)"; fail=1; }
+teardown
+
 [ "$fail" -eq 0 ] && echo "ALL PASS" || { echo "FAILURES"; exit 1; }
