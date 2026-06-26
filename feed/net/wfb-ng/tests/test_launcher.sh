@@ -112,4 +112,18 @@ refute_log "iw dev mon0 del" "mon-up does NOT delete an existing vif"
 printf '%s' "$out" | grep -q "already up" && echo "ok - reports 'already up'" || { echo "NOT ok - missing 'already up' (got: $out)"; fail=1; }
 teardown
 
+# Test 7: TXPOWER is applied on the phy, not the monitor vif.
+# `iw dev <mon> set txpower` returns -122 (EOPNOTSUPP) on the AR9344, so the knob
+# must go through `iw phy <phy> set txpower` to actually take effect.
+setup
+cat > "$WFB_CONF" <<'EOF'
+RX_STREAMS="0:10000"
+TX_PORTS=""
+TXPOWER=3000
+EOF
+sh "$LAUNCHER" start
+assert_log "iw phy phy0 set txpower fixed 3000" "txpower set on phy when TXPOWER given"
+refute_log "iw dev mon0 set txpower" "txpower NOT set on the monitor vif (-122 on hw)"
+teardown
+
 [ "$fail" -eq 0 ] && echo "ALL PASS" || { echo "FAILURES"; exit 1; }
