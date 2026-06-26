@@ -11,7 +11,7 @@ cd /opt/ib
 
 mkdir -p packages
 cp /work/build/packages/wfb-ng-*.apk packages/
-# Our patched mac80211/ath9k kmods (PKG_RELEASE=2) override the stock -r1 ones.
+# Our patched mac80211/ath9k kmods (PKG_RELEASE=3) override the stock -r1 ones.
 cp /work/build/packages/kmod-*.apk packages/
 
 for p in $PROFILES; do
@@ -24,7 +24,7 @@ for p in $PROFILES; do
   # The struct-ABI change spans mac80211 + ath9k, so assert BOTH (plus ath9k-common) are our
   # -r2 and that no stock -r1 of them slipped in (a mixed install would shift the noise offset).
   for k in kmod-mac80211 kmod-ath9k kmod-ath9k-common; do
-    awk -v k="$k" '$1==k{if ($0 ~ /-r2$/) ok=1; else bad=1} END{exit !(ok && !bad)}' "$man" \
+    awk -v k="$k" '$1==k{if ($0 ~ /-r3$/) ok=1; else bad=1} END{exit !(ok && !bad)}' "$man" \
       || { echo "ERROR: $p: $k is not our -r2 build"; exit 1; }
   done
 done

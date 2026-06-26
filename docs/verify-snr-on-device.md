@@ -21,10 +21,10 @@ Over SSH/serial on the device:
 ```sh
 dmesg | grep -i ath9k          # no vermagic / module-load errors
 iw phy                         # phy0 present
-apk list --installed | grep -E 'kmod-(mac80211|ath9k)'   # expect 6.12.87.6.18.26-r2 (our build), not -r1
+apk list --installed | grep -E 'kmod-(mac80211|ath9k)'   # expect 6.12.87.6.18.26-r3 (our build), not -r1
 ```
 
-The `-r2` release is the marker that the patched bundle (not stock `-r1`) is installed.
+The `-r3` release is the marker that the patched bundle (not stock `-r1`) is installed.
 
 ## 3. Radiotap mechanism check — is DBM_ANTNOISE emitted?
 
@@ -62,7 +62,7 @@ the per-antenna stats line:
 
 ## If SNR is still 0
 
-1. Confirm the loaded module is our `-r2` (step 2) — a stock `-r1` kmod has no antnoise emit.
+1. Confirm the loaded module is our `-r3` (step 2) — a stock `-r1` kmod has no antnoise emit.
 2. Capture a pcap (step 3) and check the radiotap `present` bitmap bit 6 (DBM_ANTNOISE) — if the
    field is absent, the wrong driver is loaded.
 3. If `dbm_antnoise` is present but wfb-ng still shows 0, confirm wfb-ng's `rx.hpp` SNR path

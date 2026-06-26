@@ -2,13 +2,14 @@ ath9k/mac80211: emit per-frame noise floor as radiotap DBM_ANTNOISE
 
 ath9k already computes the calibrated noise floor (ah->noise) and folds it into
 rx_status->signal. Expose it via a new ieee80211_rx_status.noise field and emit it
-in the monitor-mode radiotap header as IEEE80211_RADIOTAP_DBM_ANTNOISE (bit 6,
-immediately after DBM_ANTSIGNAL). This lets wfb-ng compute SNR = signal - noise on
-ath9k links, which otherwise report SNR 0 because mac80211 never emits antnoise.
+in the monitor-mode radiotap header as IEEE80211_RADIOTAP_DBM_ANTNOISE (bit 6) so
+wfb-ng can compute SNR = signal - noise (otherwise SNR reads 0).
 
-The hdrlen reservation and the writer are gated on the identical "status->noise"
-condition so the radiotap header stays byte-consistent. The CPE510 firmware is
-ath9k-only, so the sentinel gate is safe: ath9k sets noise on every frame.
+It is emitted both as the aggregate field AND per radiotap chain (the noise floor
+is per-radio, identical for every chain), so multi-antenna ath9k reports SNR on
+every antenna, not just antenna 0. hdrlen and writer are gated on the identical
+status->noise condition. The CPE510 firmware is ath9k-only, so the sentinel gate
+is safe: ath9k sets noise on every frame.
 
 --- a/net/mac80211/rx.c
 +++ b/net/mac80211/rx.c
@@ -23,7 +24,26 @@ ath9k-only, so the sentinel gate is safe: ath9k sets noise on every frame.
  	/* antenna field, if we don't have per-chain info */
  	if (!status->chains)
  		len += 1;
-@@ -459,6 +463,14 @@
+@@ -186,6 +190,9 @@
+ 	if (status->chains) {
+ 		/* antenna and antenna signal fields */
+ 		len += 2 * hweight8(status->chains);
++		/* + per-chain noise (radiotap antnoise for per-antenna SNR) */
++		if (status->noise)
++			len += hweight8(status->chains);
+ 	}
+ 
+ 	if (status->flag & RX_FLAG_RADIOTAP_TLV_AT_END) {
+@@ -369,6 +376,8 @@
+ 		it_present++;
+ 		it_present_val = BIT(IEEE80211_RADIOTAP_ANTENNA) |
+ 				 BIT(IEEE80211_RADIOTAP_DBM_ANTSIGNAL);
++		if (status->noise)
++			it_present_val |= BIT(IEEE80211_RADIOTAP_DBM_ANTNOISE);
+ 	}
+ 
+ 	if (status->flag & RX_FLAG_RADIOTAP_TLV_AT_END)
+@@ -459,6 +468,14 @@
  		pos++;
  	}
  
@@ -38,6 +58,15 @@ ath9k-only, so the sentinel gate is safe: ath9k sets noise on every frame.
  	/* IEEE80211_RADIOTAP_LOCK_QUALITY is missing */
  
  	if (!status->chains) {
+@@ -705,6 +722,8 @@
+ 
+ 	for_each_set_bit(chain, &chains, IEEE80211_MAX_CHAINS) {
+ 		*pos++ = status->chain_signal[chain];
++		if (status->noise)
++			*pos++ = status->noise;	/* IEEE80211_RADIOTAP_DBM_ANTNOISE */
+ 		*pos++ = chain;
+ 	}
+ }
 --- a/drivers/net/wireless/ath/ath9k/common.c
 +++ b/drivers/net/wireless/ath/ath9k/common.c
 @@ -270,6 +270,7 @@
