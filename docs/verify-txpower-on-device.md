@@ -21,21 +21,25 @@ Bring up a monitor vif on a 5.8 GHz channel (the wfb-ng launcher does this on st
 iw phy phy0 set txpower fixed 3000      # request 30 dBm (note: phy, not "dev mon0" — that is -122)
 iw dev mon0 info | grep txpower         # EXPECT: txpower 30.00 dBm  (was clamped to 25.00)
 iw phy phy0 set txpower fixed 4000      # request 40 dBm
-iw dev mon0 info | grep txpower         # EXPECT: txpower 31.50 dBm  (silicon cap, saturates)
+iw dev mon0 info | grep txpower         # shows 40.00 (echoes the mac80211 request); the HARDWARE
+                                        # caps at 31.5 dBm — confirm with the register read below
 ```
 
-Register-level proof — the hardware was actually programmed, not just the software readback:
+Register-level proof — the hardware was actually programmed, not just the software readback.
+Register `0x0080e8` packs four per-rate powers as half-dB bytes (`0x32`=25.0, `0x3c`=30.0,
+`0x3f`=63=31.5 = MAX_RATE_POWER):
 
 ```
-# AR_PHY_POWER_TX_RATE* hold per-rate power in half-dB. After 'fixed 3000', the
-# active rate fields should read ~0x3c (=60 = 30 dBm), up from ~0x32 (=50 = 25 dBm).
-cat /sys/kernel/debug/ieee80211/phy0/ath9k/regdump | grep -iE 'POWER_TX_RATE'
-# (or read individually via regidx/regval)
+R=/sys/kernel/debug/ieee80211/phy0/ath9k/regdump
+iw phy phy0 set txpower fixed 3000; sleep 1; grep '^0x0080e8 ' $R   # EXPECT 0x3f3f3c3c (0x3c = 30 dBm)
+iw phy phy0 set txpower fixed 4000; sleep 1; grep '^0x0080e8 ' $R   # EXPECT 0x3f3f3f3f (capped 31.5)
+iw phy phy0 set txpower auto;       sleep 1; grep '^0x0080e8 ' $R   # EXPECT 0x3f3f3232 (0x32 = 25 dBm)
 ```
 
-> `iw phy phy0 info` still shows the channel max as the calibrated ~25 dBm — that is expected and
-> correct. The per-interface `iw dev mon0 info` reflects the actual set value; the advertised
-> channel max stays calibrated by design (so the default is safe — see §3).
+> Two readbacks differ by design: `iw dev mon0 info` echoes the mac80211 *request* (so a 40 dBm
+> request reads 40.00 even though the PHY is at 0x3f = 31.5), while `iw phy phy0 info` keeps showing
+> the calibrated channel max (~25). The hardware truth is register `0x0080e8`. Don't request above
+> 31.5 dBm — the silicon can't emit it; the readback just over-reports.
 
 ## 3. Safe default (regression — must still hold)
 
@@ -69,8 +73,12 @@ power. If an SDR / RF power meter is available, measure conducted power at the S
 
 ## PASS criteria
 
-- §2 shows **30 dBm** (and 31.5 at the cap) at `iw dev mon0 info` AND the register dump, **and**
-- §3 still shows the **calibrated ~25 dBm default** (auto / empty `TXPOWER`).
+- §2 register `0x0080e8` reads **`0x3f3f3c3c`** (30 dBm) under `fixed 3000` and **`0x3f3f3f3f`**
+  (31.5 dBm cap) under `fixed 4000`, **and**
+- §3 register reads **`0x3f3f3232`** (calibrated 25 dBm) under `auto` / empty `TXPOWER`.
+
+> Verified on the bench CPE510 v3 (2026-06-27): all three register values observed exactly as
+> above; `iw dev mon0 info` read 30.00 / 40.00 / 25.00 respectively.
 
 ## If it fails
 
