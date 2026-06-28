@@ -85,6 +85,31 @@ Pick the file matching your hardware revision. From stock TP-Link: use the
 Autostart is **off** until you `/etc/init.d/wfb-ng enable` — by design it stays
 off otherwise.
 
+## Radio metrics: SNR and EVM
+
+The image carries patched `mac80211`/`ath9k` kmods that expose two extra
+per-frame metrics in the monitor-mode radiotap header, so the aggregator's
+`wfb-cli` shows them per antenna next to RSSI:
+
+- **SNR [dB]** — derived from the calibrated noise floor (radiotap `DBM_ANTNOISE`).
+- **EVM [dB]** — `|EVM|` in dB, higher = better, from the ar9003 RX descriptor's
+  per-pilot EVM (radiotap `LOCK_QUALITY`). EVM is per *spatial stream*, not per
+  antenna, so the one per-frame value is shown on every antenna that received
+  the frame.
+
+### ⚠ ath9k EVM limitation (CPE510 / AR9344)
+
+The AR9344's ar9003 hardware only measures EVM reliably for **short frames**.
+For **long frames it returns "measurement-failed" markers** instead of real EVM,
+so the driver drops those readings (requires ≥3 valid pilot bytes, and discards
+any frame containing a failure marker). In practice this means **EVM is reported
+only for the short control streams (mavlink / tunnel) and is blank (`--`) for the
+video stream** — the high-bitrate stream you'd most want it for. Control streams
+typically read ~15–25 dB; the gap below SNR is genuine non-thermal impairment
+(multipath / interference). For the video link, rely on **SNR + FEC-recovery**
+stats instead. (This is hardware-specific to ar9003; the Realtek 88x2 path
+computes EVM differently and isn't subject to this limit.)
+
 ## On-device smoke test
 
 ```sh

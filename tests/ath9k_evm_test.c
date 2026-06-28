@@ -18,18 +18,29 @@ static u8 ath9k_cmn_evm_db(u32 e0, u32 e1, u32 e2, u32 e3, u32 e4)
 	for (w = 0; w < 4; w++)
 		for (b = 0; b < 4; b++) {
 			u8 v = (words[w] >> (8 * b)) & 0xff;
-			if (v != 0x80 && v != 0) { sum += v; n++; }
+
+			if (v == 0 || v == 0x80)
+				continue;	/* empty / not measured */
+			if (v > 0x80)
+				return 0;	/* failed marker -> drop frame */
+			sum += v;
+			n++;
 		}
-	/* evm4 carries only its low 2 bytes (status10 & 0xffff) */
-	for (b = 0; b < 2; b++) {
+	for (b = 0; b < 2; b++) {		/* evm4: low 2 bytes only */
 		u8 v = (e4 >> (8 * b)) & 0xff;
-		if (v != 0x80 && v != 0) { sum += v; n++; }
+
+		if (v == 0 || v == 0x80)
+			continue;
+		if (v > 0x80)
+			return 0;
+		sum += v;
+		n++;
 	}
 
-	if (n == 0)
-		return 0;                       /* no survivors -> absent */
+	if (n < 3)
+		return 0;			/* too few pilots -> absent */
 
-	return (u8)(sum / n);                    /* |EVM| in dB, higher = better */
+	return (u8)(sum / n);
 }
 
 /* pack 4 bytes little-endian into a descriptor word */
@@ -37,31 +48,28 @@ static u32 W(u8 a, u8 b, u8 c, u8 d) { return a | (b << 8) | (c << 16) | ((u32)d
 
 int main(void)
 {
-	/* legacy frame: all 0x80 -> absent */
+	/* legacy frame: all 0x80 -> no valid pilots -> absent */
 	assert(ath9k_cmn_evm_db(0x80808080u, 0x80808080u, 0x80808080u, 0x80808080u, 0x8080u) == 0);
 
-	/* single survivor 30 -> 30 dB (no scaling, no clamp) */
-	assert(ath9k_cmn_evm_db(W(30,0x80,0x80,0x80), 0x80808080u, 0x80808080u, 0x80808080u, 0x8080u) == 30);
+	/* control frame (short): 4 clean pilots [15,19,22,23] in evm0 -> 19 dB */
+	assert(ath9k_cmn_evm_db(W(15,19,22,23), 0x00000000u, 0x00000000u, 0x80808080u, 0x8080u) == 19);
 
-	/* HT20: 4 survivors of 20 -> 20 dB */
-	assert(ath9k_cmn_evm_db(W(20,20,20,20), 0x80808080u, 0x80808080u, 0x80808080u, 0x8080u) == 20);
+	/* video frame (long): a failed marker (>0x80) anywhere drops the whole frame.
+	 * 0xfe in evm0 -> absent, regardless of the rest. */
+	assert(ath9k_cmn_evm_db(W(0xfe,6,0xff,0xfe), W(0xff,0xfe,0,9), 0u, 0x80808080u, 0x8080u) == 0);
 
-	/* HT40: 6 survivors of 24 -> 24 dB */
-	assert(ath9k_cmn_evm_db(W(24,24,24,24), W(24,0x80,0x80,24), 0x80808080u, 0x80808080u, 0x8080u) == 24);
+	/* failed marker in a LATER word still drops the frame even after clean pilots:
+	 * evm0 clean [15,19,22,23], then 0xff in evm1 -> absent */
+	assert(ath9k_cmn_evm_db(W(15,19,22,23), W(0xff,0,0,0), 0u, 0x80808080u, 0x8080u) == 0);
 
-	/* high reading: avg 40 -> 40 dB (NOT clamped) */
-	assert(ath9k_cmn_evm_db(W(40,40,40,40), 0x80808080u, 0x80808080u, 0x80808080u, 0x8080u) == 40);
+	/* too few pilots: only 2 valid -> absent (>=3 required) */
+	assert(ath9k_cmn_evm_db(W(15,19,0x80,0x80), 0x00000000u, 0x00000000u, 0x80808080u, 0x8080u) == 0);
 
-	/* skip 0: zero bytes are unpopulated pilot slots, not 0 dB EVM.
-	 * bytes [30,30,0,0] -> the two 0s skipped -> avg of two 30s -> 30 dB.
-	 * (This is the short-frame fix: zeros must not drag the average down.) */
-	assert(ath9k_cmn_evm_db(W(30,30,0,0), 0x80808080u, 0x80808080u, 0x80808080u, 0x8080u) == 30);
+	/* skip 0x00 holes: [15,0,19,22] -> 3 valid -> (15+19+22)/3 = 18 dB */
+	assert(ath9k_cmn_evm_db(W(15,0,19,22), 0x00000000u, 0x00000000u, 0x80808080u, 0x8080u) == 18);
 
-	/* all-zero survivors -> none valid -> absent */
-	assert(ath9k_cmn_evm_db(W(0,0x80,0x80,0x80), 0x80808080u, 0x80808080u, 0x80808080u, 0x8080u) == 0);
-
-	/* evm4 path: only its low 2 bytes count. low2 = [20,20] -> 20 dB */
-	assert(ath9k_cmn_evm_db(0x80808080u, 0x80808080u, 0x80808080u, 0x80808080u, W(20,20,0,0)) == 20);
+	/* evm4 contributes its low 2 bytes: evm0 [15,19] + evm4 [22,23] -> 4 valid -> 19 dB */
+	assert(ath9k_cmn_evm_db(W(15,19,0x80,0x80), 0x00000000u, 0x00000000u, 0x80808080u, W(22,23,0,0)) == 19);
 
 	printf("ath9k_evm_test: all passed\n");
 	return 0;
