@@ -1,0 +1,115 @@
+ath9k/mac80211: emit per-frame EVM as radiotap LOCK_QUALITY
+
+ar9003 carries per-pilot EVM in the RX descriptor (evm0..4). Average the
+valid bytes (0x01..0x7f) and report |EVM| in dB (higher = better, like SNR)
+via a new ieee80211_rx_status.evm field, emitted as the aggregate radiotap
+LOCK_QUALITY (bit 7) so wfb-ng reports per-antenna EVM. 0x00/0x80 are
+skipped; a byte > 0x80 is a measurement-failed marker (ar9003 returns these
+for long frames) and drops the whole frame to absent; needs >= 3 pilots.
+NOTE: ar9003 cannot measure EVM for long frames, so in practice EVM is only
+reported for short control streams; video shows no EVM. Applies after antnoise.
+
+--- a/include/net/mac80211.h
++++ b/include/net/mac80211.h
+@@ -1679,6 +1679,7 @@
+ 	u8 antenna;
+ 	s8 signal;
+ 	s8 noise;	/* NF in dBm; 0 = not present (ath9k radiotap antnoise) */
++	u8 evm;		/* |EVM| in dB, higher = better; 0 = absent (radiotap LOCK_QUALITY) */
+ 	u8 chains;
+ 	s8 chain_signal[IEEE80211_MAX_CHAINS];
+ 	u8 zero_length_psdu_type;
+--- a/drivers/net/wireless/ath/ath9k/common.c
++++ b/drivers/net/wireless/ath/ath9k/common.c
+@@ -211,6 +211,48 @@
+ }
+ EXPORT_SYMBOL(ath9k_cmn_process_rate);
+ 
++/* Average the per-pilot EVM bytes from the ar9003 RX descriptor and return
++ * |EVM| in dB (higher = better, like SNR); 0 = absent. Valid pilot bytes are
++ * 0x01..0x7f; 0x00 (empty) and 0x80 (not measured) are skipped. A byte > 0x80
++ * is a "measurement failed" marker that ar9003 returns for long frames (e.g.
++ * video) -- those readings are nonsense, so the whole frame is dropped to
++ * absent. Requires >= 3 valid pilots. Net effect: EVM is reported only for the
++ * short control streams; long/video frames show no EVM (see README, ath9k EVM
++ * limitation). Keep in sync with tests/ath9k_evm_test.c. */
++static u8 ath9k_cmn_evm_db(u32 e0, u32 e1, u32 e2, u32 e3, u32 e4)
++{
++	u32 words[4] = { e0, e1, e2, e3 };
++	u32 sum = 0, n = 0;
++	int w, b;
++
++	for (w = 0; w < 4; w++)
++		for (b = 0; b < 4; b++) {
++			u8 v = (words[w] >> (8 * b)) & 0xff;
++
++			if (v == 0 || v == 0x80)
++				continue;	/* empty / not measured */
++			if (v > 0x80)
++				return 0;	/* failed marker -> drop frame */
++			sum += v;
++			n++;
++		}
++	for (b = 0; b < 2; b++) {		/* evm4: low 2 bytes only */
++		u8 v = (e4 >> (8 * b)) & 0xff;
++
++		if (v == 0 || v == 0x80)
++			continue;
++		if (v > 0x80)
++			return 0;
++		sum += v;
++		n++;
++	}
++
++	if (n < 3)
++		return 0;			/* too few pilots -> absent */
++
++	return (u8)(sum / n);
++}
++
+ void ath9k_cmn_process_rssi(struct ath_common *common,
+ 			    struct ieee80211_hw *hw,
+ 			    struct ath_rx_status *rx_stats,
+@@ -271,6 +313,9 @@
+ 
+ 	rxs->signal = ah->noise + rx_stats->rs_rssi;
+ 	rxs->noise = ah->noise;
++	rxs->evm = ath9k_cmn_evm_db(rx_stats->evm0, rx_stats->evm1,
++				    rx_stats->evm2, rx_stats->evm3,
++				    rx_stats->evm4);
+ }
+ EXPORT_SYMBOL(ath9k_cmn_process_rssi);
+ 
+--- a/net/mac80211/rx.c
++++ b/net/mac80211/rx.c
+@@ -139,6 +139,13 @@
+ 	if (status->noise)
+ 		len += 1;
+ 
++	/* IEEE80211_RADIOTAP_LOCK_QUALITY (u16, 2-byte aligned) */
++	if (status->evm) {
++		if (len & 1)
++			len++;
++		len += 2;
++	}
++
+ 	/* antenna field, if we don't have per-chain info */
+ 	if (!status->chains)
+ 		len += 1;
+@@ -476,7 +483,15 @@
+ 		pos++;
+ 	}
+ 
+-	/* IEEE80211_RADIOTAP_LOCK_QUALITY is missing */
++	/* IEEE80211_RADIOTAP_LOCK_QUALITY (u16, 2-byte aligned) */
++	if (status->evm) {
++		while ((pos - (u8 *)rthdr) & 1)
++			*pos++ = 0;
++		put_unaligned_le16(status->evm, pos);
++		rthdr->it_present |=
++			cpu_to_le32(BIT(IEEE80211_RADIOTAP_LOCK_QUALITY));
++		pos += 2;
++	}
+ 
+ 	if (!status->chains) {
+ 		/* IEEE80211_RADIOTAP_ANTENNA */
