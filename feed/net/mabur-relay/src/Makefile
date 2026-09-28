@@ -6,7 +6,7 @@ override CFLAGS += -std=gnu99 -Wall -Wextra
 TESTDIR ?= ../tests
 
 LIB_OBJS = wire.o filter.o ws.o tune.o
-RELAY_OBJS =
+RELAY_OBJS = relay.o
 
 all: mabur-relay
 
