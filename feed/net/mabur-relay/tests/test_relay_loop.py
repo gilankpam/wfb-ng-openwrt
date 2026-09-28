@@ -229,5 +229,134 @@ class UdpTests(RelayTestBase):
         b.send(tune(14, 149, 1))
         self.assertEqual(b.statuses(b.recv_all(0.5))[-1]['state'], 0)
 
+import base64, hashlib
+
+class Ws:
+    def __init__(self, relay, rcvbuf=None):
+        self.s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        if rcvbuf: self.s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, rcvbuf)
+        self.s.connect(('127.0.0.1', relay.ws_port))
+        key = base64.b64encode(os.urandom(16)).decode()
+        self.s.sendall(('GET / HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\n'
+                        'Connection: Upgrade\r\nSec-WebSocket-Key: %s\r\n'
+                        'Sec-WebSocket-Version: 13\r\n\r\n' % key).encode())
+        resp = b''
+        while b'\r\n\r\n' not in resp: resp += self.s.recv(1)
+        want = base64.b64encode(hashlib.sha1(
+            (key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').encode()).digest()).decode()
+        assert b'101' in resp and want.encode() in resp, resp
+        self.buf = b''
+
+    def send(self, payload, op=2):
+        mk = os.urandom(4)
+        n = len(payload)
+        h = bytes([0x80 | op, 0x80 | n]) if n < 126 else bytes([0x80 | op, 0x80 | 126]) + struct.pack('>H', n)
+        self.s.sendall(h + mk + bytes(b ^ mk[i & 3] for i, b in enumerate(payload)))
+
+    def _one(self):
+        while True:
+            if len(self.buf) >= 2:
+                l, o = self.buf[1] & 0x7F, 2
+                if l == 126 and len(self.buf) >= 4: l, o = struct.unpack('>H', self.buf[2:4])[0], 4
+                elif l == 127 and len(self.buf) >= 10: l, o = struct.unpack('>Q', self.buf[2:10])[0], 10
+                if l < 126 or o > 2:
+                    if len(self.buf) >= o + l:
+                        op, p = self.buf[0] & 0x0F, self.buf[o:o + l]
+                        self.buf = self.buf[o + l:]
+                        return op, p
+            d = self.s.recv(65536)
+            if not d: raise EOFError
+            self.buf += d
+
+    def recv_all(self, quiet=0.3):
+        out = []; self.s.settimeout(quiet)
+        try:
+            while True:
+                op, p = self._one()
+                if op == 2: out.append(parse(p))
+        except (socket.timeout, EOFError): pass
+        return out
+
+    def frames(self, msgs): return [m for k, m in msgs if k == 'F']
+    def statuses(self, msgs): return [m for k, m in msgs if k == 'S']
+    def closed(self, wait=0.5):
+        self.s.settimeout(wait)
+        try: return self.s.recv(1) == b''
+        except socket.timeout: return False
+        except ConnectionResetError: return True
+
+class WsTests(RelayTestBase):
+    def test_ws_gets_same_frames_as_udp(self):
+        u, w = Udp(self.r), Ws(self.r)
+        u.send(hello()); w.send(hello()); time.sleep(0.1); u.recv_all(0.1); w.recv_all(0.1)
+        self.r.inject(FX * 5)
+        fu, fw = u.frames(u.recv_all()), w.frames(w.recv_all())
+        self.assertEqual(len(fw), 15)
+        self.assertEqual([(f['seq'], f['ch'], f['body'], f['flags'] & 1) for f in fu],
+                         [(f['seq'], f['ch'], f['body'], f['flags'] & 1) for f in fw])
+
+    def test_ws_alone_owns_and_can_tune(self):
+        w = Ws(self.r); w.send(hello())
+        st = w.statuses(w.recv_all())
+        self.assertEqual((st[-1]['owner'], st[-1]['you_own']), (2, 1))
+        w.send(tune(20, 149, 1))
+        st = w.statuses(w.recv_all(0.5))
+        self.assertEqual([(s['state'], s['tune_id']) for s in st][-2:], [(1, 20), (0, 20)])
+
+    def test_ws_tune_refused_while_udp_alive_then_accepted(self):
+        u, w = Udp(self.r), Ws(self.r)
+        u.send(hello()); w.send(hello()); time.sleep(0.1); u.recv_all(0.1); w.recv_all(0.1)
+        w.send(tune(21, 149, 1))
+        st = w.statuses(w.recv_all())
+        self.assertEqual([(s['state'], s['tune_id'], s['owner'], s['you_own']) for s in st],
+                         [(3, 21, 1, 0)])
+        for _ in range(6):                          # WS keeps alive, UDP lapses
+            time.sleep(0.45); w.send(hello())
+        w.recv_all(0.1)
+        w.send(tune(22, 149, 1))
+        self.assertEqual(w.statuses(w.recv_all(0.5))[-1]['state'], 0)
+
+    def test_ws_without_hello_is_closed(self):
+        w = Ws(self.r)
+        time.sleep(2.5)
+        self.assertTrue(w.closed())
+
+    def test_third_ws_closed_at_accept(self):
+        a, b = Ws(self.r), Ws(self.r)
+        a.send(hello()); b.send(hello()); time.sleep(0.1)
+        s = socket.create_connection(('127.0.0.1', self.r.ws_port))
+        s.settimeout(1.0)
+        try: data = s.recv(1)
+        except ConnectionResetError: data = b''
+        self.assertEqual(data, b'')
+
+    def test_ws_slow_reader_does_not_hurt_udp(self):
+        u, w = Udp(self.r), Ws(self.r, rcvbuf=4096)
+        u.send(hello()); w.send(hello()); time.sleep(0.1); u.recv_all(0.1); w.recv_all(0.1)
+        N = 3000
+        fu = []
+        for i in range(N // 100):                   # keep both alive while flooding
+            self.r.inject([FX[0]] * 100)
+            u.send(hello()); w.send(hello())
+            fu += u.frames(u.recv_all(0.05))        # drain: rmem_max caps SO_RCVBUF
+        fu += u.frames(u.recv_all(0.5))
+        self.assertEqual(len(fu), N)
+        seqs = [f['seq'] for f in fu]
+        self.assertEqual(seqs, list(range(seqs[0], seqs[0] + N)))
+        fw = w.frames(w.recv_all(0.5))
+        self.assertLess(len(fw), N)
+        self.assertTrue(any(f['flags'] & 2 for f in fw))
+        w.send(hello())
+        st = w.statuses(w.recv_all(0.5))
+        self.assertGreater(st[-1]['your_drops'], 0)
+
+    def test_ws_garbage_closes_only_that_client(self):
+        u, w = Udp(self.r), Ws(self.r)
+        u.send(hello()); w.send(hello()); time.sleep(0.1); u.recv_all(0.1)
+        w.s.sendall(b'\x82\x05hello')               # unmasked client frame = protocol error
+        self.assertTrue(w.closed())
+        self.r.inject(FX[:1])
+        self.assertEqual(len(u.frames(u.recv_all())), 1)
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

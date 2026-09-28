@@ -19,6 +19,8 @@
 #include "filter.h"
 #include "tune.h"
 #include "wire.h"
+#include "ws.h"
+#include <netinet/tcp.h>
 
 #define MAX_UDP 4
 #define HELLO_TIMEOUT_MS 2000
@@ -39,10 +41,26 @@ struct tune_st {
 /* Owner identity: kind 0 none, 1 UDP, 2 WS; idx into that table. */
 struct owner { int kind, idx; };
 
+#define MAX_WS 2
+#define WS_QCAP 64
+#define WS_SLOT (10 + MR_FRAME_HDR_LEN + RX_MAX)
+#define WS_IN_MAX 16384
+#define WS_SNDBUF 65536
+
+struct ws_slot { uint16_t len; uint8_t is_status; uint8_t data[WS_SLOT]; };
+struct ws_client {
+  int fd, used, upgraded;
+  uint64_t joined_ms, last_hello_ms;
+  uint8_t in[WS_IN_MAX]; size_t in_len;
+  struct ws_slot q[WS_QCAP]; int q_head, q_count; size_t q_off;
+  uint32_t drops; int dropped;
+};
+
 static struct {
   const struct relay_cfg *cfg;
   int rx_fd, udp_fd, ws_fd, sig_rd, sig_wr;
   struct udp_sub udp[MAX_UDP];
+  struct ws_client ws[MAX_WS];
   struct tune_st tn;
   struct owner owner;
   uint32_t seq, rx, fwd, foreign, bad_fcs, malformed, bad_msg, refused;
@@ -305,17 +323,187 @@ static void reap_udp(void) {
     }
 }
 
-/* ---------- WS (Task 6 replaces these stubs) ---------- */
+/* ---------- WS ---------- */
 
-static void ws_broadcast_status(void) {}
-static struct owner ws_oldest(void) { struct owner o = {0, -1}; return o; }
-static void ws_send_frame(const uint8_t *h, const uint8_t *p, size_t l) { (void)h; (void)p; (void)l; }
-static void ws_reply(int idx, const struct mr_status *s) { (void)idx; (void)s; }
-static void ws_touch(int idx) { (void)idx; }
-static int ws_open_listener(void) { return -1; }
-static int ws_poll_fill(struct pollfd *p) { (void)p; return 0; }
-static void ws_poll_handle(const struct pollfd *p, int n) { (void)p; (void)n; }
-static void reap_ws(void) {}
+static void ws_close(int i) {
+  if (!R.ws[i].used) return;
+  close(R.ws[i].fd);
+  R.ws[i].used = 0;
+  syslog(LOG_INFO, "ws #%d closed", i);
+}
+
+/* Enqueue one relay message. Frames drop (newest) when full; STATUS evicts the
+ * oldest frame not partially written. Returns 0 queued, -1 dropped. */
+static int ws_enqueue(int i, const uint8_t *a, size_t al, const uint8_t *b, size_t bl, int is_status) {
+  struct ws_client *c = &R.ws[i];
+  if (c->q_count == WS_QCAP) {
+    if (!is_status) return -1;
+    int victim = -1;
+    for (int k = 0; k < c->q_count; k++) {
+      int s = (c->q_head + k) % WS_QCAP;
+      if (k == 0 && c->q_off > 0) continue;
+      if (!c->q[s].is_status) { victim = k; break; }
+    }
+    if (victim < 0) return -1;
+    for (int k = victim; k < c->q_count - 1; k++)
+      c->q[(c->q_head + k) % WS_QCAP] = c->q[(c->q_head + k + 1) % WS_QCAP];
+    c->q_count--;
+    c->drops++; c->dropped = 1;
+  }
+  struct ws_slot *s = &c->q[(c->q_head + c->q_count) % WS_QCAP];
+  size_t h = ws_frame_header(s->data, al + bl, WS_OP_BINARY);
+  memcpy(s->data + h, a, al);
+  if (bl) memcpy(s->data + h + al, b, bl);
+  s->len = (uint16_t)(h + al + bl); s->is_status = (uint8_t)is_status;
+  c->q_count++;
+  return 0;
+}
+
+static void ws_flush(int i) {
+  struct ws_client *c = &R.ws[i];
+  while (c->q_count) {
+    struct ws_slot *s = &c->q[c->q_head];
+    ssize_t n = send(c->fd, s->data + c->q_off, s->len - c->q_off, MSG_DONTWAIT | MSG_NOSIGNAL);
+    if (n < 0) { if (errno == EAGAIN || errno == EWOULDBLOCK) return; ws_close(i); return; }
+    c->q_off += (size_t)n;
+    if (c->q_off < s->len) return;
+    c->q_off = 0; c->q_head = (c->q_head + 1) % WS_QCAP; c->q_count--;
+  }
+}
+
+static void ws_reply(int idx, const struct mr_status *s) {
+  struct mr_status c = *s; uint8_t b[MR_STATUS_LEN];
+  c.your_drops = R.ws[idx].drops;
+  mr_pack_status(b, &c);
+  ws_enqueue(idx, b, sizeof b, NULL, 0, 1);
+  ws_flush(idx);
+}
+
+static void ws_broadcast_status(void) {
+  for (int i = 0; i < MAX_WS; i++) {
+    if (!R.ws[i].used || !R.ws[i].upgraded) continue;
+    struct mr_status s; fill_status(&s, 2, i);
+    ws_reply(i, &s);
+  }
+}
+
+static struct owner ws_oldest(void) {
+  struct owner o = {0, -1}; uint64_t best = UINT64_MAX;
+  for (int i = 0; i < MAX_WS; i++)
+    if (R.ws[i].used && R.ws[i].upgraded && R.ws[i].joined_ms < best) {
+      best = R.ws[i].joined_ms; o.kind = 2; o.idx = i;
+    }
+  return o;
+}
+
+static void ws_send_frame(const uint8_t *hdr, const uint8_t *pkt, size_t len) {
+  uint8_t h[MR_FRAME_HDR_LEN];
+  for (int i = 0; i < MAX_WS; i++) {
+    struct ws_client *c = &R.ws[i];
+    if (!c->used || !c->upgraded) continue;
+    memcpy(h, hdr, sizeof h);
+    if (c->dropped) h[MR_FLAGS_OFFSET] |= MR_FLAG_DROPPED;
+    if (ws_enqueue(i, h, sizeof h, pkt, len, 0) < 0) { c->drops++; c->dropped = 1; }
+    else c->dropped = 0;
+    ws_flush(i);
+  }
+}
+
+static void ws_touch(int idx) { R.ws[idx].last_hello_ms = now_ms(); }
+
+static int ws_open_listener(void) {
+  int fd = socket(AF_INET, SOCK_STREAM, 0);
+  if (fd < 0) return -1;
+  int one = 1;
+  setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+  struct sockaddr_in a = {0};
+  a.sin_family = AF_INET; a.sin_port = htons(R.cfg->ws_port); a.sin_addr.s_addr = htonl(INADDR_ANY);
+  if (bind(fd, (struct sockaddr *)&a, sizeof a) < 0 || listen(fd, 4) < 0) { close(fd); return -1; }
+  set_nonblock(fd);
+  return fd;
+}
+
+static void ws_accept(void) {
+  for (;;) {
+    int fd = accept(R.ws_fd, NULL, NULL);
+    if (fd < 0) return;
+    int i;
+    for (i = 0; i < MAX_WS && R.ws[i].used; i++) {}
+    if (i == MAX_WS) { close(fd); R.refused++; continue; }
+    set_nonblock(fd);
+    int snd = WS_SNDBUF, one = 1;
+    setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &snd, sizeof snd);
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+    struct ws_client *c = &R.ws[i];
+    c->fd = fd; c->used = 1; c->upgraded = 0; c->in_len = 0;
+    c->q_head = c->q_count = 0; c->q_off = 0; c->drops = 0; c->dropped = 0;
+    c->joined_ms = c->last_hello_ms = now_ms();
+    syslog(LOG_INFO, "ws #%d connected", i);
+  }
+}
+
+static void ws_read(int i) {
+  struct ws_client *c = &R.ws[i];
+  ssize_t n = recv(c->fd, c->in + c->in_len, sizeof c->in - c->in_len, MSG_DONTWAIT);
+  if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) { ws_close(i); return; }
+  if (n < 0) return;
+  c->in_len += (size_t)n;
+  if (!c->upgraded) {
+    char key[WS_KEY_MAX]; size_t used = 0;
+    int r = ws_parse_upgrade((const char *)c->in, c->in_len, key, &used);
+    if (r < 0) { ws_close(i); return; }
+    if (r == 0) { if (c->in_len == sizeof c->in) ws_close(i); return; }
+    char resp[256];
+    size_t rl = ws_build_response(resp, sizeof resp, key);
+    if (rl == 0 || send(c->fd, resp, rl, MSG_NOSIGNAL) != (ssize_t)rl) { ws_close(i); return; }
+    c->upgraded = 1; c->joined_ms = c->last_hello_ms = now_ms();
+    memmove(c->in, c->in + used, c->in_len - used); c->in_len -= used;
+  }
+  for (;;) {
+    uint8_t op, *pl; size_t plen;
+    long used = ws_parse_frame(c->in, c->in_len, &op, &pl, &plen, 512);
+    if (used < 0) { ws_close(i); return; }
+    if (used == 0) { if (c->in_len == sizeof c->in) ws_close(i); return; }
+    if (op == WS_OP_CLOSE) { ws_close(i); return; }
+    if (op == WS_OP_BINARY) handle_msg(2, i, pl, plen);
+    else if (op == WS_OP_TEXT) { ws_close(i); return; }
+    if (!R.ws[i].used) return;
+    memmove(c->in, c->in + used, c->in_len - (size_t)used); c->in_len -= (size_t)used;
+  }
+}
+
+/* Poll slots: [0] listener, then one per used client, in index order. */
+static int ws_poll_fill(struct pollfd *p) {
+  int n = 0;
+  if (R.ws_fd < 0) return 0;
+  p[n++] = (struct pollfd){R.ws_fd, POLLIN, 0};
+  for (int i = 0; i < MAX_WS; i++)
+    if (R.ws[i].used)
+      p[n++] = (struct pollfd){R.ws[i].fd, (short)(POLLIN | (R.ws[i].q_count ? POLLOUT : 0)), 0};
+  return n;
+}
+
+static void ws_poll_handle(const struct pollfd *p, int n) {
+  if (n == 0) return;
+  int k = 1;
+  for (int i = 0; i < MAX_WS && k < n; i++) {
+    if (!R.ws[i].used || R.ws[i].fd != p[k].fd) continue;
+    short ev = p[k++].revents;
+    if (ev & (POLLERR | POLLHUP)) { ws_close(i); continue; }
+    if (ev & POLLIN) ws_read(i);
+    if (R.ws[i].used && (ev & POLLOUT)) ws_flush(i);
+  }
+  if (p[0].revents & POLLIN) ws_accept();
+}
+
+static void reap_ws(void) {
+  uint64_t t = now_ms();
+  for (int i = 0; i < MAX_WS; i++)
+    if (R.ws[i].used && t - R.ws[i].last_hello_ms > HELLO_TIMEOUT_MS) {
+      syslog(LOG_INFO, "ws #%d lapsed", i);
+      ws_close(i);
+    }
+}
 
 /* ---------- sockets ---------- */
 
