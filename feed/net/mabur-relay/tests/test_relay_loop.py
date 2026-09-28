@@ -144,6 +144,15 @@ class UdpTests(RelayTestBase):
         self.r.inject(FX[:1])
         self.assertEqual(subs[4].frames(subs[4].recv_all()), [])
 
+    def test_fifth_udp_tune_refused_with_its_id(self):
+        subs = [Udp(self.r) for _ in range(5)]
+        for s in subs[:4]: s.send(hello())
+        time.sleep(0.1)
+        subs[4].send(tune(42, 149, 1))
+        st = subs[4].statuses(subs[4].recv_all())
+        self.assertEqual([(s['state'], s['tune_id']) for s in st], [(3, 42)])
+        self.assertEqual([c for c in self.r.calls() if c], [])
+
     def test_retune_ok_then_state_file(self):
         u = Udp(self.r); u.send(hello()); u.recv_all(0.1)
         u.send(tune(5, 149, 1))

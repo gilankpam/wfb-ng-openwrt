@@ -237,9 +237,9 @@ static int udp_find(const struct sockaddr_in *a, int create) {
   return free_i;
 }
 
-static void reply_udp_refused(const struct sockaddr_in *a) {
+static void reply_udp_refused(const struct sockaddr_in *a, uint16_t tune_id) {
   struct mr_status s; uint8_t b[MR_STATUS_LEN];
-  fill_status(&s, 0, -1); s.state = 3;
+  fill_status(&s, 0, -1); s.state = 3; s.tune_id = tune_id;
   mr_pack_status(b, &s);
   sendto(R.udp_fd, b, sizeof b, MSG_DONTWAIT, (const struct sockaddr *)a, sizeof *a);
   R.refused++;
@@ -283,7 +283,15 @@ static void udp_drain(void) {
       R.bad_msg++; continue;
     }
     int i = udp_find(&a, 1);
-    if (i < 0) { reply_udp_refused(&a); continue; }
+    if (i < 0) {
+      uint16_t tune_id = R.tn.busy ? R.tn.cur.tune_id : R.tn.last_id;
+      if (type == MR_TUNE) {
+        struct mr_tune t;
+        if (mr_parse_tune(b, (size_t)n, &t) == MR_OK) tune_id = t.tune_id;
+      }
+      reply_udp_refused(&a, tune_id);
+      continue;
+    }
     handle_msg(1, i, b, (size_t)n);
   }
 }
