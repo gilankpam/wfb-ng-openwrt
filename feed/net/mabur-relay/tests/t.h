@@ -8,4 +8,5 @@ extern int t_failures;
   if (_a != _b) { t_failures++; fprintf(stderr, "FAIL %s:%d: %s == %s (%lld != %lld)\n", \
   __FILE__, __LINE__, #a, #b, _a, _b); } } while (0)
 void t_wire(const char *fixtures_dir);
+void t_filter(const char *fixtures_dir);
 #endif
