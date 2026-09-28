@@ -61,15 +61,17 @@ size_t ws_base64(const uint8_t *in, size_t n, char *out) {
   return o;
 }
 
-void ws_accept_key(const char *client_key, char out[29]) {
+int ws_accept_key(const char *client_key, char out[29]) {
   static const char guid[] = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
   char cat[WS_KEY_MAX + sizeof guid];
   size_t kl = strlen(client_key);
+  if (kl >= WS_KEY_MAX) { out[0] = 0; return -1; }
   memcpy(cat, client_key, kl);
   memcpy(cat + kl, guid, sizeof guid - 1);
   uint8_t d[20];
   ws_sha1((const uint8_t *)cat, kl + sizeof guid - 1, d);
   ws_base64(d, 20, out);
+  return 0;
 }
 
 /* Finds "\r\n\r\n"; requires "GET " and a Sec-WebSocket-Key header
@@ -101,7 +103,7 @@ int ws_parse_upgrade(const char *req, size_t n, char key[WS_KEY_MAX], size_t *co
 
 size_t ws_build_response(char *out, size_t cap, const char *client_key) {
   char acc[29];
-  ws_accept_key(client_key, acc);
+  if (ws_accept_key(client_key, acc) != 0) return 0;
   int n = snprintf(out, cap,
                    "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
                    "Connection: Upgrade\r\nSec-WebSocket-Accept: %s\r\n\r\n", acc);

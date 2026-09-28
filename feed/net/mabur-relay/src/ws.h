@@ -14,10 +14,10 @@
  * line), 0 = need more bytes, -1 = invalid request. */
 int ws_parse_upgrade(const char *req, size_t n, char key[WS_KEY_MAX], size_t *consumed);
 
-/* Writes the 28-char Sec-WebSocket-Accept value + NUL. */
-void ws_accept_key(const char *client_key, char out[29]);
+/* Writes the 28-char Sec-WebSocket-Accept value + NUL. Returns 0 ok; -1 if strlen(client_key) >= WS_KEY_MAX (out set to empty string). */
+int ws_accept_key(const char *client_key, char out[29]);
 
-/* Full "101 Switching Protocols" response; returns its length (0 if cap too small). */
+/* Full "101 Switching Protocols" response; returns its length (0 if cap too small or the key is too long). */
 size_t ws_build_response(char *out, size_t cap, const char *client_key);
 
 /* Server->client header for one FIN frame; returns 2, 4 or 10. */

@@ -17,7 +17,7 @@ static void t_sha1_b64(void) {
 
 static void t_handshake(void) {
   char out[29];
-  ws_accept_key("dGhlIHNhbXBsZSBub25jZQ==", out);
+  CHECK_EQ(ws_accept_key("dGhlIHNhbXBsZSBub25jZQ==", out), 0);
   CHECK(strcmp(out, "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=") == 0);
 
   const char *req =
@@ -40,6 +40,19 @@ static void t_handshake(void) {
   CHECK(strstr(resp, "HTTP/1.1 101") == resp);
   CHECK(strstr(resp, "Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n") != NULL);
   CHECK(n >= 4 && memcmp(resp + n - 4, "\r\n\r\n", 4) == 0);
+
+  /* Test key length boundary: 63 bytes OK, 64+ reject */
+  char key63[64], key64[65], key200[201];
+  memset(key63, 'A', 63); key63[63] = 0;
+  memset(key64, 'A', 64); key64[64] = 0;
+  memset(key200, 'A', 200); key200[200] = 0;
+
+  CHECK_EQ(ws_accept_key(key63, out), 0);
+  CHECK_EQ(ws_accept_key(key64, out), -1);
+  CHECK(out[0] == 0);
+  CHECK_EQ(ws_accept_key(key200, out), -1);
+  CHECK(out[0] == 0);
+  CHECK_EQ(ws_build_response(resp, sizeof resp, key200), 0);
 }
 
 static void t_server_header(void) {
