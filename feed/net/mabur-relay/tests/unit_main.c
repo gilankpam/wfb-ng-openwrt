@@ -6,6 +6,7 @@ int main(int argc, char **argv) {
   t_wire(fx);
   t_filter(fx);
   t_ws(fx);
+  t_tune(fx);
   if (t_failures) { fprintf(stderr, "%d FAILURE(S)\n", t_failures); return 1; }
   printf("ALL PASS\n");
   return 0;

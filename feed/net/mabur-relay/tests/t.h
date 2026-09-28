@@ -10,4 +10,5 @@ extern int t_failures;
 void t_wire(const char *fixtures_dir);
 void t_filter(const char *fixtures_dir);
 void t_ws(const char *fixtures_dir);
+void t_tune(const char *fixtures_dir);
 #endif
