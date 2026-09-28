@@ -281,7 +281,10 @@ class Ws:
     def statuses(self, msgs): return [m for k, m in msgs if k == 'S']
     def closed(self, wait=0.5):
         self.s.settimeout(wait)
-        try: return self.s.recv(1) == b''
+        try:
+            while True:
+                d = self.s.recv(65536)
+                if not d: return True
         except socket.timeout: return False
         except ConnectionResetError: return True
 
@@ -345,7 +348,13 @@ class WsTests(RelayTestBase):
         self.assertEqual(seqs, list(range(seqs[0], seqs[0] + N)))
         fw = w.frames(w.recv_all(0.5))
         self.assertLess(len(fw), N)
-        self.assertTrue(any(f['flags'] & 2 for f in fw))
+        last = fw[-1]['seq'] if fw else None
+        self.r.inject([FX[0]] * 5); w.send(hello())
+        fw2 = w.frames(w.recv_all(0.5))
+        self.assertGreaterEqual(len(fw2), 1)
+        self.assertTrue(fw2[0]['flags'] & 2)
+        if last is not None: self.assertGreater(fw2[0]['seq'], last + 1)
+        self.assertFalse(any(f['flags'] & 2 for f in fw2[1:]))
         w.send(hello())
         st = w.statuses(w.recv_all(0.5))
         self.assertGreater(st[-1]['your_drops'], 0)
