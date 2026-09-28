@@ -1,0 +1,3 @@
+src/*.o
+src/mabur-relay
+src/unit_tests
