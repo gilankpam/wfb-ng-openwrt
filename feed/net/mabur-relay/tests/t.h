@@ -9,4 +9,5 @@ extern int t_failures;
   __FILE__, __LINE__, #a, #b, _a, _b); } } while (0)
 void t_wire(const char *fixtures_dir);
 void t_filter(const char *fixtures_dir);
+void t_ws(const char *fixtures_dir);
 #endif

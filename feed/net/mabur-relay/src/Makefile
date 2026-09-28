@@ -5,7 +5,7 @@ CFLAGS ?= -O2
 override CFLAGS += -std=gnu99 -Wall -Wextra
 TESTDIR ?= ../tests
 
-LIB_OBJS = wire.o filter.o
+LIB_OBJS = wire.o filter.o ws.o
 RELAY_OBJS =
 
 all: mabur-relay
@@ -13,7 +13,7 @@ all: mabur-relay
 mabur-relay: main.o $(RELAY_OBJS) $(LIB_OBJS)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^
 
-unit_tests: $(TESTDIR)/unit_main.c $(TESTDIR)/test_wire.c $(TESTDIR)/test_filter.c $(LIB_OBJS)
+unit_tests: $(TESTDIR)/unit_main.c $(TESTDIR)/test_wire.c $(TESTDIR)/test_filter.c $(TESTDIR)/test_ws.c $(LIB_OBJS)
 	$(CC) $(CFLAGS) -I. -I$(TESTDIR) $(LDFLAGS) -o $@ $^
 
 %.o: %.c
