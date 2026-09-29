@@ -211,27 +211,30 @@ static void handle_tune(int kind, int idx, const struct mr_tune *t) {
 
 static void ws_send_frame(const uint8_t *hdr, const uint8_t *pkt, size_t len);   /* Task 6 */
 
-static void forward(const uint8_t *pkt, size_t len, int bad_fcs) {
+static void forward(const uint8_t *pkt, size_t len, const struct rtap_info *ri) {
   uint8_t hdr[MR_FRAME_HDR_LEN];
   R.fwd++;
-  if (bad_fcs) R.bad_fcs++;
-  /* mcs/rssi/noise/tsf are placeholders until Task 3 wires rtap into forward(). */
+  if (ri->bad_fcs) R.bad_fcs++;
+  size_t dl = len - ri->rt_len;
+  if (ri->has_fcs && dl >= 28) dl -= 4;
+  const uint8_t *d = pkt + ri->rt_len;
+  uint8_t base_flags = (uint8_t)((ri->bad_fcs ? MR_FLAG_BADFCS : 0) | ri->phy_flags);
   struct mr_frame_meta fm = {R.seq++, (uint8_t)(R.tn.busy ? 0 : R.tn.channel), R.tn.sec,
-                             (uint8_t)(bad_fcs ? MR_FLAG_BADFCS : 0), MR_MCS_NONE,
-                             {MR_DBM_ABSENT, MR_DBM_ABSENT}, {MR_DBM_ABSENT, MR_DBM_ABSENT}, 0};
+                             base_flags, ri->mcs,
+                             {ri->rssi[0], ri->rssi[1]}, {ri->noise[0], ri->noise[1]}, ri->tsf_lo};
   mr_pack_frame_hdr(hdr, &fm);
   for (int i = 0; i < MAX_UDP; i++) {
     struct udp_sub *u = &R.udp[i];
     if (!u->used) continue;
-    hdr[MR_FLAGS_OFFSET] = (uint8_t)((bad_fcs ? MR_FLAG_BADFCS : 0) | (u->dropped ? MR_FLAG_DROPPED : 0));
-    struct iovec iov[2] = {{hdr, sizeof hdr}, {(void *)pkt, len}};
+    hdr[MR_FLAGS_OFFSET] = (uint8_t)(base_flags | (u->dropped ? MR_FLAG_DROPPED : 0));
+    struct iovec iov[2] = {{hdr, sizeof hdr}, {(void *)d, dl}};
     struct msghdr m = {0};
     m.msg_name = &u->addr; m.msg_namelen = sizeof u->addr; m.msg_iov = iov; m.msg_iovlen = 2;
     if (sendmsg(R.udp_fd, &m, MSG_DONTWAIT) < 0) { u->drops++; u->dropped = 1; }
     else u->dropped = 0;
   }
-  hdr[MR_FLAGS_OFFSET] = bad_fcs ? MR_FLAG_BADFCS : 0;
-  ws_send_frame(hdr, pkt, len);
+  hdr[MR_FLAGS_OFFSET] = base_flags;
+  ws_send_frame(hdr, d, dl);
 }
 
 static int rx_drain(void) {
@@ -251,7 +254,7 @@ static int rx_drain(void) {
     struct filter_result f = filter_frame(buf, (size_t)n);
     if (f.v == FV_MALFORMED) R.malformed++;
     else if (f.v == FV_FOREIGN) R.foreign++;
-    else forward(buf, (size_t)n, f.bad_fcs);
+    else forward(buf, (size_t)n, &f.ri);
   }
   return 0;
 }

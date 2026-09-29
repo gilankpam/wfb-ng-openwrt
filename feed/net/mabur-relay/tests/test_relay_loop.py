@@ -26,6 +26,9 @@ def hdr(t): return struct.pack('<HBB', 0x524D, 2, t)
 def hello(): return hdr(HELLO)
 def tune(tid, ch, sec): return hdr(TUNE) + struct.pack('<HBB', tid, ch, sec)
 
+def rt_len(f): return struct.unpack('<H', f[2:4])[0]
+def dot11(f): return f[rt_len(f):-4]      # fixtures carry radiotap FCS flag 0x10
+
 def parse(msg):
     magic, ver, t = struct.unpack('<HBB', msg[:4])
     assert magic == 0x524D and ver == 2, msg[:4]
@@ -125,7 +128,7 @@ class UdpTests(RelayTestBase):
             self.assertEqual(seqs, list(range(seqs[0], seqs[0] + 75)))
             self.assertEqual({f['ch'] for f in fr}, {136})
             bodies = [f['body'] for f in fr[:3]]
-            self.assertEqual(bodies, [FX[0], FX[1], FX[3]])   # foreign (2) dropped
+            self.assertEqual(bodies, [dot11(FX[0]), dot11(FX[1]), dot11(FX[3])])   # foreign (2) dropped
             self.assertEqual([f['flags'] & 1 for f in fr[:3]], [0, 0, 1])
 
     def test_counters_in_status(self):
@@ -139,7 +142,7 @@ class UdpTests(RelayTestBase):
         u = Udp(self.r); u.send(hello()); u.recv_all(0.1)
         self.r.inject([FX[0][:30], b'\x00' * 7, FX[0]])
         fr = u.frames(u.recv_all())
-        self.assertEqual([f['body'] for f in fr], [FX[0]])
+        self.assertEqual([f['body'] for f in fr], [dot11(FX[0])])
 
     def test_subscriber_reaped_after_2s_without_hello(self):
         u = Udp(self.r); u.send(hello()); u.recv_all(0.1)
@@ -265,6 +268,29 @@ class UdpTests(RelayTestBase):
             if proc.poll() is None:
                 proc.kill(); proc.wait(5)
             shutil.rmtree(d, ignore_errors=True)
+
+class V2Tests(RelayTestBase):
+    def test_v2_body_is_dot11_without_radiotap_or_fcs(self):
+        u = Udp(self.r); u.send(hello()); u.recv_all(0.1)
+        self.r.inject([FX[0], FX[1], FX[3]])
+        fr = u.frames(u.recv_all())
+        self.assertEqual([f['body'] for f in fr], [dot11(FX[0]), dot11(FX[1]), dot11(FX[3])])
+
+    def test_v2_metadata_from_radiotap(self):
+        u = Udp(self.r); u.send(hello()); u.recv_all(0.1)
+        self.r.inject([FX[0], FX[1], FX[3]])
+        q, p, b = u.frames(u.recv_all())
+        self.assertEqual((q['mcs'], q['flags'] & 0x7d, q['rssi'], q['tsf']), (4, 0x10, (-128, -128), 86499716))
+        self.assertEqual((p['mcs'], p['flags'] & 0x7d, p['rssi'], p['noise'], p['tsf']),
+                         (0, 0x14, (-37, -44), (-95, -95), 86535458))
+        self.assertEqual((b['mcs'], b['flags'] & 0x7d, b['rssi']), (0xFF, 0x05, (-37, -44)))
+
+    def test_tiny_frame_keeps_header(self):
+        u = Udp(self.r); u.send(hello()); u.recv_all(0.1)
+        tiny = FX[0][:rt_len(FX[0]) + 26]           # dot11 part 26 B < 28: no FCS strip
+        self.r.inject([tiny])
+        fr = u.frames(u.recv_all())
+        self.assertEqual(fr[0]['body'], tiny[rt_len(tiny):])
 
 import base64, hashlib
 
