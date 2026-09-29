@@ -156,5 +156,30 @@ CPE510 v3 flashed with `sysupgrade -n` from master `b0a3039`
   you_own 1). **PASS**
 - Footprint: 29.7 MB RAM free, overlay 2.3 MB free.
 
-Still open: the full-rate run (item 2 above).
+Full-rate run: see below.
+
+## Full-rate run 2026-09-29
+
+Flashed CPE (master `b0a3039` image), drone low-power mode temporarily disabled
+(restored afterwards), link on 136 HT40- at mcs4/40, drone ~3,100 frames/s.
+30 s windows, host on the CPE LAN.
+
+| | UDP subscriber only | UDP + one WS subscriber |
+|---|---|---|
+| Relay frames read | 92,832 (3,094/s, 36.1 Mb/s) | 48,181 (1,606/s) |
+| GS Realtek cards, same window | 91,396 / 90,496 | — |
+| Datagrams IP-fragmented | 96 % | 98 % |
+| Relay `seq` gaps (relay→client) | 0 | 0 (UDP), 0 (WS) |
+| RX-socket drops (`rx socket dropped`) | 0 | ~1,000–1,700 frames/s |
+| CPE CPU | **65 %** (relay ~75 % in `top`) | **100 %** (saturated) |
+
+- **One UDP subscriber at full rate: works, no loss anywhere, but CPU 65 % —
+  FAILS the < 50 % gate** (headroom ~35 %).
+- **UDP + WS at full rate: NOT viable as built.** The relay saturates the
+  560 MHz MIPS and loses about half the air frames at the RX socket; the
+  `rxdrop` warning makes this visible, as intended.
+- Cost drivers not yet profiled (no `perf` on the image). Candidates: one
+  `recv` + one `sendmsg` syscall per frame per subscriber, kernel IP
+  fragmentation of every ~1.5 KB datagram (54 B radiotap pushes 1,435 B frames
+  over the 1,472 B UDP payload), and the WS path's per-frame slot copy + TCP.
 
