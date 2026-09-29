@@ -13,9 +13,12 @@ static void put_hdr(uint8_t *out, uint8_t type) {
   put16(out, MR_MAGIC); out[2] = MR_VER; out[3] = type;
 }
 
-size_t mr_pack_frame_hdr(uint8_t *out, uint32_t seq, uint8_t rx_channel, uint8_t sec, uint8_t flags) {
-  put_hdr(out, MR_FRAME); put32(out + 4, seq);
-  out[8] = rx_channel; out[9] = sec; out[10] = flags;
+size_t mr_pack_frame_hdr(uint8_t *out, const struct mr_frame_meta *m) {
+  put_hdr(out, MR_FRAME); put32(out + 4, m->seq);
+  out[8] = m->rx_channel; out[9] = m->sec; out[10] = m->flags; out[11] = m->mcs;
+  out[12] = (uint8_t)m->rssi[0]; out[13] = (uint8_t)m->rssi[1];
+  out[14] = (uint8_t)m->noise[0]; out[15] = (uint8_t)m->noise[1];
+  put32(out + 16, m->tsf_lo);
   return MR_FRAME_HDR_LEN;
 }
 
@@ -51,10 +54,13 @@ static int expect(const uint8_t *b, size_t n, uint8_t want, size_t len) {
   return n < len ? MR_ESHORT : MR_OK;
 }
 
-int mr_parse_frame_hdr(const uint8_t *b, size_t n, uint32_t *seq, uint8_t *rx_channel, uint8_t *sec, uint8_t *flags) {
+int mr_parse_frame_hdr(const uint8_t *b, size_t n, struct mr_frame_meta *m) {
   int rc = expect(b, n, MR_FRAME, MR_FRAME_HDR_LEN);
   if (rc != MR_OK) return rc;
-  *seq = get32(b + 4); *rx_channel = b[8]; *sec = b[9]; *flags = b[10];
+  m->seq = get32(b + 4); m->rx_channel = b[8]; m->sec = b[9]; m->flags = b[10]; m->mcs = b[11];
+  m->rssi[0] = (int8_t)b[12]; m->rssi[1] = (int8_t)b[13];
+  m->noise[0] = (int8_t)b[14]; m->noise[1] = (int8_t)b[15];
+  m->tsf_lo = get32(b + 16);
   return MR_OK;
 }
 

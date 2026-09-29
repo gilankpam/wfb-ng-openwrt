@@ -215,7 +215,11 @@ static void forward(const uint8_t *pkt, size_t len, int bad_fcs) {
   uint8_t hdr[MR_FRAME_HDR_LEN];
   R.fwd++;
   if (bad_fcs) R.bad_fcs++;
-  mr_pack_frame_hdr(hdr, R.seq++, R.tn.busy ? 0 : R.tn.channel, R.tn.sec, bad_fcs ? MR_FLAG_BADFCS : 0);
+  /* mcs/rssi/noise/tsf are placeholders until Task 3 wires rtap into forward(). */
+  struct mr_frame_meta fm = {R.seq++, (uint8_t)(R.tn.busy ? 0 : R.tn.channel), R.tn.sec,
+                             (uint8_t)(bad_fcs ? MR_FLAG_BADFCS : 0), MR_MCS_NONE,
+                             {MR_DBM_ABSENT, MR_DBM_ABSENT}, {MR_DBM_ABSENT, MR_DBM_ABSENT}, 0};
+  mr_pack_frame_hdr(hdr, &fm);
   for (int i = 0; i < MAX_UDP; i++) {
     struct udp_sub *u = &R.udp[i];
     if (!u->used) continue;

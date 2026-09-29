@@ -22,16 +22,17 @@ def load_fixtures():
 
 FX = load_fixtures()          # 0 qos, 1 probe, 2 foreign, 3 bad-fcs
 
-def hdr(t): return struct.pack('<HBB', 0x524D, 1, t)
+def hdr(t): return struct.pack('<HBB', 0x524D, 2, t)
 def hello(): return hdr(HELLO)
 def tune(tid, ch, sec): return hdr(TUNE) + struct.pack('<HBB', tid, ch, sec)
 
 def parse(msg):
     magic, ver, t = struct.unpack('<HBB', msg[:4])
-    assert magic == 0x524D and ver == 1, msg[:4]
+    assert magic == 0x524D and ver == 2, msg[:4]
     if t == FRAME:
-        seq, ch, sec, fl = struct.unpack('<IBBB', msg[4:11])
-        return ('F', dict(seq=seq, ch=ch, sec=sec, flags=fl, body=msg[11:]))
+        seq, ch, sec, fl, mcs, r0, r1, n0, n1, tsf = struct.unpack('<IBBBBbbbbI', msg[4:20])
+        return ('F', dict(seq=seq, ch=ch, sec=sec, flags=fl, mcs=mcs,
+                           rssi=(r0, r1), noise=(n0, n1), tsf=tsf, body=msg[20:]))
     if t == STATUS:
         f = struct.unpack('<HBBBBBIIIIII', msg[4:35])
         keys = ['tune_id', 'state', 'ch', 'sec', 'owner', 'you_own',
