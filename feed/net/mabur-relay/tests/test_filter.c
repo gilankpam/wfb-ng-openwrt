@@ -9,8 +9,10 @@ static void t_filter_fixtures(void) {
   struct filter_result r;
   r = filter_frame(fr[0], fl[0]);
   CHECK_EQ(r.v, FV_FORWARD); CHECK_EQ(r.bad_fcs, 0); CHECK_EQ(r.rt_len, 40);
+  CHECK_EQ(r.ri.mcs, 4);
   r = filter_frame(fr[1], fl[1]);                 /* extended present bitmap */
   CHECK_EQ(r.v, FV_FORWARD); CHECK_EQ(r.bad_fcs, 0); CHECK_EQ(r.rt_len, 43);
+  CHECK_EQ(r.ri.rssi[1], -44);
   r = filter_frame(fr[2], fl[2]);
   CHECK_EQ(r.v, FV_FOREIGN);
   r = filter_frame(fr[3], fl[3]);                 /* garbage SA, but BADFCS */

@@ -1,0 +1,81 @@
+#include <string.h>
+#include "t.h"
+#include "pcap.h"
+#include "rtap.h"
+
+static uint8_t *fr[8]; static size_t fl[8];
+
+static void t_rtap_fixtures(void) {
+  struct rtap_info ri;
+  CHECK_EQ(rtap_parse(fr[0], fl[0], &ri), 0);
+  CHECK_EQ(ri.rt_len, 40); CHECK_EQ(ri.has_fcs, 1); CHECK_EQ(ri.bad_fcs, 0);
+  CHECK_EQ(ri.tsf_lo, 86499716u); CHECK_EQ(ri.mcs, 4);
+  CHECK_EQ(ri.phy_flags, RT_STBC);
+  CHECK_EQ(ri.rssi[0], RT_ABSENT); CHECK_EQ(ri.rssi[1], RT_ABSENT);
+  CHECK_EQ(ri.noise[0], RT_ABSENT); CHECK_EQ(ri.noise[1], RT_ABSENT);
+
+  CHECK_EQ(rtap_parse(fr[1], fl[1], &ri), 0);          /* 3 present words */
+  CHECK_EQ(ri.rt_len, 43); CHECK_EQ(ri.tsf_lo, 86535458u); CHECK_EQ(ri.mcs, 0);
+  CHECK_EQ(ri.phy_flags, RT_PHY_VALID | RT_STBC);
+  CHECK_EQ(ri.rssi[0], -37); CHECK_EQ(ri.rssi[1], -44);   /* per chain, not combined -36 */
+  CHECK_EQ(ri.noise[0], -95); CHECK_EQ(ri.noise[1], -95);
+
+  CHECK_EQ(rtap_parse(fr[3], fl[3], &ri), 0);
+  CHECK_EQ(ri.bad_fcs, 1); CHECK_EQ(ri.has_fcs, 1); CHECK_EQ(ri.tsf_lo, 86967089u);
+  CHECK_EQ(ri.mcs, RT_MCS_NONE); CHECK_EQ(ri.phy_flags, RT_PHY_VALID);
+  CHECK_EQ(ri.rssi[0], -37); CHECK_EQ(ri.rssi[1], -44);
+  CHECK_EQ(ri.noise[0], -95); CHECK_EQ(ri.noise[1], -95);
+}
+
+static void t_rtap_malformed(void) {
+  struct rtap_info ri; uint8_t b[256];
+  CHECK_EQ(rtap_parse(fr[0], 7, &ri), -1);
+  memcpy(b, fr[0], fl[0]); b[0] = 1;                    CHECK_EQ(rtap_parse(b, fl[0], &ri), -1);
+  memcpy(b, fr[0], fl[0]); b[2] = 0xFF; b[3] = 0;       CHECK_EQ(rtap_parse(b, fl[0], &ri), -1);
+  memcpy(b, fr[1], fl[1]); b[2] = 12; b[3] = 0;         CHECK_EQ(rtap_parse(b, fl[1], &ri), -1);
+  /* it_len cut inside the MCS field of frame 0 (MCS is the 2nd-to-last field) */
+  memcpy(b, fr[0], fl[0]); b[2] = 30; b[3] = 0;         CHECK_EQ(rtap_parse(b, fl[0], &ri), -1);
+}
+
+/* A radiotap-namespace bit the parser has no size for (bit 25 is unassigned):
+ * parsing stops there; what came before is kept; no read past it_len. */
+static void t_rtap_unknown_field(void) {
+  uint8_t b[64] = {0};
+  b[0] = 0; b[2] = 8 + 8 + 1; b[3] = 0;                /* it_len 17 */
+  uint32_t pres = 0x1 | 0x2 | (1u << 25);               /* TSFT, FLAGS, unknown */
+  b[4] = pres; b[5] = pres >> 8; b[6] = pres >> 16; b[7] = pres >> 24;
+  b[8] = 0x44; b[9] = 0x33; b[10] = 0x22; b[11] = 0x11;  /* TSFT lo */
+  b[16] = 0x10;                                          /* FLAGS: FCS present */
+  struct rtap_info ri;
+  CHECK_EQ(rtap_parse(b, 64, &ri), 0);
+  CHECK_EQ(ri.tsf_lo, 0x11223344u); CHECK_EQ(ri.has_fcs, 1); CHECK_EQ(ri.mcs, RT_MCS_NONE);
+}
+
+/* A vendor namespace (bit 30 in word 0) is skipped by its skip_length; the
+ * radiotap fields before it are still parsed. */
+static void t_rtap_vendor_ns(void) {
+  uint8_t b[64] = {0};
+  /* words: w0 = FLAGS | vendor-next | ext; w1 = vendor word (bits ignored) */
+  uint32_t w0 = 0x2 | (1u << 30) | (1u << 31), w1 = 0x1;
+  b[4] = w0; b[5] = w0 >> 8; b[6] = w0 >> 16; b[7] = w0 >> 24;
+  b[8] = w1; b[9] = w1 >> 8; b[10] = w1 >> 16; b[11] = w1 >> 24;
+  b[12] = 0x50;                                          /* FLAGS: FCS + bad FCS */
+  /* vendor header at off 14 (align 2): OUI 3 B, subns 1 B, skip_length u16 = 4 */
+  b[14] = 0x00; b[15] = 0x11; b[16] = 0x22; b[17] = 0; b[18] = 4; b[19] = 0;
+  /* 4 vendor bytes 20..23 */
+  b[2] = 24; b[3] = 0;                                   /* it_len 24 */
+  struct rtap_info ri;
+  CHECK_EQ(rtap_parse(b, 64, &ri), 0);
+  CHECK_EQ(ri.bad_fcs, 1); CHECK_EQ(ri.has_fcs, 1);
+  b[18] = 40;                                            /* skip past it_len */
+  CHECK_EQ(rtap_parse(b, 64, &ri), -1);
+}
+
+void t_rtap(const char *fx) {
+  char path[512];
+  snprintf(path, sizeof path, "%s/frames.pcap", fx);
+  int n = pcap_load(path, fr, fl, 8);
+  CHECK_EQ(n, 4);
+  if (n != 4) return;
+  t_rtap_fixtures(); t_rtap_malformed(); t_rtap_unknown_field(); t_rtap_vendor_ns();
+}
