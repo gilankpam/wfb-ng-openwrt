@@ -106,6 +106,10 @@ is dropped and counted in `tx_refused`; the relay sends **no** STATUS for it
 counter). The relay builds the radiotap header (TX_FLAGS = NOACK, MCS with
 known BW|MCS|GI|FEC|STBC) and appends nothing: the hardware adds the FCS. A
 send error counts `tx_fail`; the frame is dropped, never retried.
+Client sockets are read before the monitor socket each loop pass, so a `TX`
+waits at most one in-progress forward batch (≤ 64 frames). mac80211 reports
+injected frames back to the monitor vif (radiotap `TX_FLAGS`); the relay
+drops these and counts `txecho` — they never reach clients.
 
 **Validation:** wrong magic, a short message, or unknown type → dropped and
 counted. `ver` ≠ 3 → dropped and counted; the client learns the relay's version
@@ -118,8 +122,9 @@ even after the 1 MiB `SO_RCVBUFFORCE`/`SO_RCVBUF` sizing). These drops are
 a client they look identical to air loss visible in the dot11 sequence number
 inside the frame. They are counted (`PACKET_STATISTICS`'s `tp_drops`,
 accumulated into the relay's own `rxdrop` counter) and logged on the device
-only: the `-v` per-second debug line includes `rxdrop N`, and each nonzero
-poll additionally logs `rx socket dropped N frames` at `LOG_WARNING`. Diagnose
+only: the `-v` per-second debug line includes
+`rxdrop N tx N txfail N txrefused N txecho N`, and each nonzero poll
+additionally logs `rx socket dropped N frames` at `LOG_WARNING`. Diagnose
 with `logread | grep mabur-relay` on the CPE, not from client-side counters.
 
 **MTU:** the largest video frame today is 20 + 1,431 + 28 = 1,479 B — one IP

@@ -20,6 +20,7 @@
 #include <linux/if_packet.h>
 #include "filter.h"
 #include "tune.h"
+#include "txrt.h"
 #include "wire.h"
 #include "ws.h"
 #include <netinet/tcp.h>
@@ -60,12 +61,13 @@ struct ws_client {
 
 static struct {
   const struct relay_cfg *cfg;
-  int rx_fd, udp_fd, ws_fd, sig_rd, sig_wr;
+  int rx_fd, tx_fd, udp_fd, ws_fd, sig_rd, sig_wr;
   struct udp_sub udp[MAX_UDP];
   struct ws_client ws[MAX_WS];
   struct tune_st tn;
   struct owner owner;
   uint32_t seq, rx, fwd, foreign, bad_fcs, malformed, bad_msg, refused, rxdrop;
+  uint32_t tx, tx_fail, tx_refused, tx_echo;
   uint64_t start_ms;
 } R;
 
@@ -103,6 +105,7 @@ static void fill_status(struct mr_status *s, int kind, int idx) {
   s->you_own = kind != 0 && R.owner.kind == kind && R.owner.idx == idx;
   s->rx = R.rx; s->fwd = R.fwd; s->foreign = R.foreign; s->bad_fcs = R.bad_fcs;
   s->uptime_s = (uint32_t)((now_ms() - R.start_ms) / 1000);
+  s->tx = R.tx; s->tx_fail = R.tx_fail; s->tx_refused = R.tx_refused;
 }
 
 static void udp_send_status(int idx, const struct mr_status *s) {
@@ -258,11 +261,32 @@ static int rx_drain(void) {
     if ((size_t)n > sizeof rxbuf[i]) { R.malformed++; continue; }
     struct filter_result f = filter_frame(buf, (size_t)n);
     if (f.v == FV_MALFORMED) R.malformed++;
+    else if (f.ri.tx_echo) R.tx_echo++;
     else if (f.v == FV_FOREIGN) R.foreign++;
     else batch_append(&nb, buf, (size_t)n, &f.ri);
   }
   flush_batch(nb);
   return 0;
+}
+
+/* ---------- TX ---------- */
+
+static void tx_inject(const struct mr_tx *t) {
+  static uint8_t pkt[TXRT_LEN + MR_TX_DOT11_MAX];
+  size_t n = txrt_build(pkt, t->mcs, t->flags);
+  memcpy(pkt + n, t->d, t->dl);
+  if (send(R.tx_fd, pkt, n + t->dl, MSG_DONTWAIT) < 0) R.tx_fail++;
+  else R.tx++;
+}
+
+static void handle_tx(int kind, int idx, const uint8_t *b, size_t n) {
+  update_owner();
+  struct mr_tx t;
+  if (R.owner.kind != kind || R.owner.idx != idx || mr_parse_tx(b, n, &t) != MR_OK) {
+    R.tx_refused++;      /* no STATUS: a per-frame refusal would be spam */
+    return;
+  }
+  tx_inject(&t);
 }
 
 /* ---------- UDP control ---------- */
@@ -312,23 +336,27 @@ static void handle_msg(int kind, int idx, const uint8_t *b, size_t n) {
     struct mr_tune t;
     if (mr_parse_tune(b, n, &t) != MR_OK) { R.bad_msg++; return; }
     handle_tune(kind, idx, &t);
+  } else if (type == MR_TX) {
+    handle_tx(kind, idx, b, n);
   } else {
-    R.bad_msg++;          /* FRAME/STATUS from a client, or reserved TX */
+    R.bad_msg++;          /* FRAME/STATUS from a client */
   }
 }
 
 static void udp_drain(void) {
-  uint8_t b[512];
+  uint8_t b[2048];
   for (;;) {
     struct sockaddr_in a; socklen_t al = sizeof a;
     ssize_t n = recvfrom(R.udp_fd, b, sizeof b, MSG_DONTWAIT, (struct sockaddr *)&a, &al);
     if (n < 0) return;
     uint8_t type;
-    if (mr_parse_header(b, (size_t)n, &type) != MR_OK || (type != MR_HELLO && type != MR_TUNE)) {
+    if (mr_parse_header(b, (size_t)n, &type) != MR_OK ||
+        (type != MR_HELLO && type != MR_TUNE && type != MR_TX)) {
       R.bad_msg++; continue;
     }
-    int i = udp_find(&a, 1);
+    int i = udp_find(&a, type != MR_TX);
     if (i < 0) {
+      if (type == MR_TX) { R.tx_refused++; continue; }
       uint16_t tune_id = R.tn.busy ? R.tn.cur.tune_id : R.tn.last_id;
       if (type == MR_TUNE) {
         struct mr_tune t;
@@ -561,7 +589,7 @@ static void ws_read(int i) {
   }
   for (;;) {
     uint8_t op, *pl; size_t plen;
-    long used = ws_parse_frame(c->in, c->in_len, &op, &pl, &plen, 512);
+    long used = ws_parse_frame(c->in, c->in_len, &op, &pl, &plen, 2048);
     if (used < 0) { ws_close(i); return; }
     if (used == 0) { if (c->in_len == sizeof c->in) ws_close(i); return; }
     if (op == WS_OP_CLOSE) { ws_close(i); return; }
@@ -631,6 +659,27 @@ static int open_rx(void) {
   return fd;
 }
 
+static int open_tx(void) {
+  if (R.cfg->tx_unix) {
+    int fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+    struct sockaddr_un a = {0};
+    a.sun_family = AF_UNIX;
+    snprintf(a.sun_path, sizeof a.sun_path, "%s", R.cfg->tx_unix);
+    if (fd < 0 || connect(fd, (struct sockaddr *)&a, sizeof a) < 0) return -1;
+    return fd;
+  }
+  /* Protocol 0 bind: this socket never receives (the RX socket owns that);
+   * send() goes out the bound ifindex. */
+  int fd = socket(AF_PACKET, SOCK_RAW | SOCK_CLOEXEC, 0);
+  if (fd < 0) return -1;
+  struct sockaddr_ll ll = {0};
+  ll.sll_family = AF_PACKET; ll.sll_protocol = 0;
+  ll.sll_ifindex = (int)if_nametoindex(R.cfg->mon);
+  if (ll.sll_ifindex == 0 || bind(fd, (struct sockaddr *)&ll, sizeof ll) < 0) { close(fd); return -1; }
+  set_nonblock(fd);
+  return fd;
+}
+
 static int open_udp(void) {
   int fd = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
   if (fd < 0) return -1;
@@ -668,6 +717,8 @@ int relay_run(const struct relay_cfg *cfg) {
   }
   R.rx_fd = open_rx();
   if (R.rx_fd < 0) { syslog(LOG_ERR, "rx socket setup failed: %s", strerror(errno)); return 1; }
+  R.tx_fd = open_tx();
+  if (R.tx_fd < 0) { syslog(LOG_ERR, "tx socket setup failed: %s", strerror(errno)); return 1; }
   R.udp_fd = open_udp();
   if (R.udp_fd < 0) { syslog(LOG_ERR, "udp socket setup failed: %s", strerror(errno)); return 1; }
   R.ws_fd = ws_open_listener();
@@ -685,6 +736,10 @@ int relay_run(const struct relay_cfg *cfg) {
     int ws_first = n;
     n += ws_poll_fill(p + n);
     if (poll(p, (nfds_t)n, 100) < 0 && errno != EINTR) return 1;
+    /* Client sockets BEFORE rx_drain: a TX read here is injected now, not
+     * after up to RX_BATCH forwarded frames. */
+    if (p[1].revents & POLLIN) udp_drain();
+    ws_poll_handle(p + ws_first, n - ws_first);
     /* RX before reap_child/finish_tune: frames the kernel queued before a
      * retune completed must still be stamped rx_channel=0 (the retune-in-
      * flight value in effect when they arrived), not the new channel that
@@ -692,8 +747,6 @@ int relay_run(const struct relay_cfg *cfg) {
     if ((p[0].revents & POLLIN) && rx_drain() < 0) return 1;
     if (p[0].revents & (POLLERR | POLLHUP)) { syslog(LOG_ERR, "rx socket error"); return 1; }
     if (p[2].revents & POLLIN) reap_child();
-    if (p[1].revents & POLLIN) udp_drain();
-    ws_poll_handle(p + ws_first, n - ws_first);
     check_watchdog();
     reap_udp();
     reap_ws();
@@ -709,8 +762,10 @@ int relay_run(const struct relay_cfg *cfg) {
         }
       }
       if (cfg->verbose)
-        syslog(LOG_DEBUG, "rx %u fwd %u foreign %u badfcs %u malformed %u badmsg %u refused %u rxdrop %u",
-               R.rx, R.fwd, R.foreign, R.bad_fcs, R.malformed, R.bad_msg, R.refused, R.rxdrop);
+        syslog(LOG_DEBUG, "rx %u fwd %u foreign %u badfcs %u malformed %u badmsg %u refused %u rxdrop %u "
+               "tx %u txfail %u txrefused %u txecho %u",
+               R.rx, R.fwd, R.foreign, R.bad_fcs, R.malformed, R.bad_msg, R.refused, R.rxdrop,
+               R.tx, R.tx_fail, R.tx_refused, R.tx_echo);
     }
   }
 }

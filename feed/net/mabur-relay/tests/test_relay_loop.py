@@ -26,6 +26,13 @@ def hdr(t): return struct.pack('<HBB', 0x524D, 3, t)
 def hello(): return hdr(HELLO)
 def tune(tid, ch, sec): return hdr(TUNE) + struct.pack('<HBB', tid, ch, sec)
 
+TXRT_RCF = bytes([0x00, 0x00, 0x0D, 0x00, 0x00, 0x80, 0x08, 0x00, 0x08, 0x00, 0x37, 0x30, 0x00])
+RCF_DOT11 = bytes([0x40, 0, 0, 0]) + b'\xff' * 6 + bytes([0x57, 0x42, 0x75, 0x05, 0xd6, 0x00]) * 2 + b'\x10\x00' + b'RCFBODY'
+def tx(mcs, flags, dot11): return hdr(TX) + bytes([mcs, flags]) + dot11
+def echo_frame():
+    """What mac80211 hands mon0 for our own injected RCF: TX_FLAGS in radiotap."""
+    return TXRT_RCF + RCF_DOT11
+
 def rt_len(f): return struct.unpack('<H', f[2:4])[0]
 def dot11(f): return f[rt_len(f):-4]      # fixtures carry radiotap FCS flag 0x10
 
@@ -67,13 +74,16 @@ class Relay:
         shutil.copy(os.path.join(HERE, 'iw-stub'), os.path.join(bindir, 'iw'))
         os.chmod(os.path.join(bindir, 'iw'), 0o755)
         self.rx_path = os.path.join(self.dir, 'rx.sock')
+        self.tx_path = os.path.join(self.dir, 'tx.sock')
+        self.txcap = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        self.txcap.bind(self.tx_path)
         self.udp_port = free_port(socket.SOCK_DGRAM)
         self.ws_port = free_port(socket.SOCK_STREAM)
         env = dict(os.environ, PATH=bindir + ':' + os.environ['PATH'], IW_STUB_DIR=self.dir)
         self.proc = subprocess.Popen(
             [RELAY, '-i', 'mon0', '-u', str(self.udp_port), '-w', str(self.ws_port),
              '-c', '136', '-s', '2', '-S', os.path.join(self.dir, 'state'),
-             '-R', self.rx_path], env=env)
+             '-R', self.rx_path, '-T', self.tx_path], env=env)
         self.rx = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
         for _ in range(100):
             if os.path.exists(self.rx_path): break
@@ -86,6 +96,12 @@ class Relay:
         return open(p).read().split('\n') if os.path.exists(p) else []
     def inject(self, frames):
         for f in frames: self.rx.send(f)
+    def injected(self, quiet=0.3):
+        out = []; self.txcap.settimeout(quiet)
+        try:
+            while True: out.append(self.txcap.recv(65536))
+        except socket.timeout: pass
+        return out
     def stop(self):
         self.proc.terminate(); self.proc.wait(5); shutil.rmtree(self.dir)
 
@@ -469,6 +485,55 @@ class WsTests(RelayTestBase):
         self.assertTrue(w.closed())
         self.r.inject(FX[:1])
         self.assertEqual(len(u.frames(u.recv_all())), 1)
+
+class TxTests(RelayTestBase):
+    def owner(self):
+        u = Udp(self.r); u.send(hello()); u.recv_all(0.2); return u
+
+    def test_owner_tx_injected_with_radiotap(self):
+        u = self.owner()
+        u.send(tx(0, 0x03, RCF_DOT11))
+        got = self.r.injected()
+        self.assertEqual(got, [TXRT_RCF + RCF_DOT11])
+        u.send(hello())
+        st = u.statuses(u.recv_all())[-1]
+        self.assertEqual((st['tx'], st['tx_fail'], st['tx_refused']), (1, 0, 0))
+
+    def test_non_owner_tx_refused_silently(self):
+        a = self.owner(); b = Udp(self.r); b.send(hello()); b.recv_all(0.2)
+        b.send(tx(0, 0x03, RCF_DOT11))
+        self.assertEqual(self.r.injected(), [])
+        self.assertEqual(b.statuses(b.recv_all(0.3)), [])          # no STATUS for a refused TX
+        a.send(hello())
+        st = a.statuses(a.recv_all())[-1]
+        self.assertEqual((st['tx'], st['tx_refused']), (0, 1))
+
+    def test_invalid_tx_refused(self):
+        u = self.owner()
+        for m in (tx(8, 0x03, RCF_DOT11), tx(0, 0x13, RCF_DOT11),
+                  tx(0, 0x03, RCF_DOT11[:23]), tx(0, 0x03, b'\x40' * 1501)):
+            u.send(m)
+        self.assertEqual(self.r.injected(), [])
+        u.send(hello())
+        st = u.statuses(u.recv_all())[-1]
+        self.assertEqual(st['tx_refused'], 4)
+
+    def test_ws_owner_can_tx(self):
+        w = Ws(self.r); w.send(hello()); w.recv_all(0.2)
+        w.send(tx(0, 0x03, RCF_DOT11))
+        self.assertEqual(self.r.injected(), [TXRT_RCF + RCF_DOT11])
+
+    def test_own_echo_not_forwarded(self):
+        u = self.owner()
+        self.r.inject([echo_frame(), FX[0]])
+        fr = u.frames(u.recv_all())
+        self.assertEqual([f['body'] for f in fr], [dot11(FX[0])])
+
+    def test_tx_while_frames_flow(self):
+        u = self.owner()
+        self.r.inject(FX * 50)
+        u.send(tx(0, 0x03, RCF_DOT11))
+        self.assertEqual(len(self.r.injected()), 1)
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
