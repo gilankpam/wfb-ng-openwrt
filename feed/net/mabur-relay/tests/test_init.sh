@@ -18,7 +18,7 @@ PATH="$BIN:$PATH"
 start_service
 assert "open_instance relay" "one relay instance"
 assert "set_param command /usr/libexec/mabur-relay-start" "procd runs the start wrapper"
-assert "set_param respawn" "respawn enabled"
+assert "set_param respawn 3600 5 0" "respawn enabled"
 : > "$LOG"
 stop_service
 assert "iw dev mon0 del" "stop removes mon0"
