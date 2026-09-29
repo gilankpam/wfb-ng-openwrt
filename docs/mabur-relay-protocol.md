@@ -1,15 +1,15 @@
-# mabur-relay wire protocol (version 2)
+# mabur-relay wire protocol (version 3)
 
 This is the committed contract between `mabur-relay` (this repo,
 `feed/net/mabur-relay/src/`) and its clients — the mabur-side `RemoteCard` in
 `maburgs` and the web GS's WebSocket source. It reflects spec §2 plus the
-2026-09-29 v2 amendment in
+2026-09-29 v3 amendment in
 `docs/superpowers/specs/2026-09-29-mabur-relay-design.md` (dev-machine only,
 gitignored); this file is the one that ships. The source of truth for the
 byte layout is `feed/net/mabur-relay/src/wire.c` plus the golden vectors in
 `feed/net/mabur-relay/tests/test_wire.c`.
 
-## 2. Wire protocol (version 2)
+## 2. Wire protocol (version 3)
 
 One message format on both transports: one message per UDP datagram, one
 message per binary WebSocket message. **All fields little-endian, serialised
@@ -17,7 +17,7 @@ field by field** — the CPE is big-endian MIPS; never `memcpy` a struct. The
 relay parses radiotap itself, on the CPE; no radiotap bytes cross the wire.
 
 **Common header (4 B):** `magic u16 = 0x524D` (bytes `4D 52`, "MR"),
-`ver u8 = 2`, `type u8`. `ver` is 2 for every message type — v1 is removed,
+`ver u8 = 3`, `type u8`. `ver` is 3 for every message type — v2 is removed,
 no compatibility shim.
 
 | type | dir | body |
@@ -25,14 +25,14 @@ no compatibility shim.
 | `1 FRAME` | relay → client | 20 B header (below), then the 802.11 frame with the trailing 4-byte FCS stripped |
 | `2 HELLO` | client → relay | empty |
 | `3 TUNE` | client → relay | `tune_id u16`, `channel u8`, `sec u8` |
-| `4 STATUS` | relay → client | `tune_id u16`, `state u8`, `channel u8`, `sec u8`, `owner u8`, `you_own u8`, then `u32`: `rx`, `fwd`, `foreign`, `bad_fcs`, `your_drops`, `uptime_s` |
-| `5 TX` | client → relay | reserved (phase 2); ignored and counted |
+| `4 STATUS` | relay → client | `tune_id u16`, `state u8`, `channel u8`, `sec u8`, `owner u8`, `you_own u8`, then `u32`: `rx`, `fwd`, `foreign`, `bad_fcs`, `your_drops`, `uptime_s`, then u32: tx, tx_fail, tx_refused |
+| `5 TX` | client → relay | mcs u8, flags u8 (bit0 LDPC, bit1 STBC, bit2 short GI, bit3 40 MHz), then the 802.11 frame without FCS (24–1500 B) |
 
 **FRAME header (20 B), immediately after the 4 B common header:**
 
 | bytes | field |
 |---|---|
-| 0–3 | common header: magic, `ver=2`, `type=1` |
+| 0–3 | common header: magic, `ver=3`, `type=1` |
 | 4–7 | `seq u32` LE |
 | 8 | `rx_channel u8` (0 = mid-retune) |
 | 9 | `sec u8` |
@@ -86,9 +86,9 @@ Field semantics:
 - `STATUS` is sent to all subscribers on retune start, completion/failure and
   ownership change, and to the sender in reply to every `HELLO`.
 - `STATUS`'s `u32` counters (`rx`, `fwd`, `foreign`, `bad_fcs`, `your_drops`,
-  `uptime_s`) wrap at 2^32 (~15 days at full video rate); a client comparing
-  two readings must compute the delta modulo 2^32, not by plain subtraction
-  with a sign check.
+  `uptime_s`, `tx`, `tx_fail`, `tx_refused`) wrap at 2^32 (~15 days at full
+  video rate); a client comparing two readings must compute the delta modulo
+  2^32, not by plain subtraction with a sign check.
 - A HELLO refused because the subscriber table is full (`state=3`) carries the
   relay's current/last `tune_id` (the same value a `STATUS` would carry for
   state 0/1/2) — `HELLO` has no request id of its own for the refusal to echo
@@ -99,10 +99,17 @@ Field semantics:
   that sent an intermediate `TUNE` in a rapid sequence should not wait for a
   `STATUS` carrying that request's `tune_id` — it will not arrive.
 
+**TX.** Only the tune owner's `TX` is injected. A `TX` from a non-owner, with
+`mcs` > 7, with a reserved flag bit set, or with a dot11 part outside 24–1500 B
+is dropped and counted in `tx_refused`; the relay sends **no** STATUS for it
+(at 20–60 uplink frames/s a per-frame refusal would be spam — watch the
+counter). The relay builds the radiotap header (TX_FLAGS = NOACK, MCS with
+known BW|MCS|GI|FEC|STBC) and appends nothing: the hardware adds the FCS. A
+send error counts `tx_fail`; the frame is dropped, never retried.
+
 **Validation:** wrong magic, a short message, or unknown type → dropped and
-counted. `ver` ≠ 2 → dropped and counted; the client learns the relay's version
-from any `STATUS` (it answers every `HELLO`). No compatibility shims — v1 is
-removed.
+counted. `ver` ≠ 3 → dropped and counted; the client learns the relay's version
+from any `STATUS` (it answers every `HELLO`). No compatibility shims.
 
 **RX-socket drops.** The relay's AF_PACKET receive socket can drop frames in
 the kernel before `mabur-relay` ever reads them (burst beyond `SO_RCVBUF`,
@@ -179,7 +186,7 @@ the CPE where the link was).
   whose dot11 part is only 24–27 B keeps its FCS: the strip only fires at
   ≥ 28 B, since stripping below that would leave less than a minimal dot11
   header. Do not parse radiotap or strip the FCS yourself; there is no
-  radiotap on the wire at all in v2.
+  radiotap on the wire at all in v3.
 - **WS subscription starts at the upgrade, not the first `HELLO`.** As soon as
   the WebSocket handshake completes, the client is a subscriber: it starts
   receiving `STATUS` and `FRAME` messages immediately, and — if it is the
@@ -213,13 +220,20 @@ same way):
 `rssi=[-37,-44]`, `noise=[-95,-95]`, `tsf_lo=0xA1B2C3D4`:
 
 ```
-4D 52 02 01 04 03 02 01 88 02 15 04 DB D4 A1 A1 D4 C3 B2 A1
+4D 52 03 01 04 03 02 01 88 02 15 04 DB D4 A1 A1 D4 C3 B2 A1
 └magic┘ver type └──seq (LE)───┘ch sec fl mcs └rssi┘ └noise┘ └─tsf_lo (LE)──┘
 ```
 
 **TUNE**, `tune_id=0xBEEF`, `channel=149`, `sec=1` (HT40+):
 
 ```
-4D 52 02 03 EF BE 95 01
+4D 52 03 03 EF BE 95 01
 └magic┘ver type └tid┘ch sec
+```
+
+**TX**, `mcs=0`, `flags=LDPC|STBC`:
+
+```
+4D 52 03 05 00 03 <dot11 frame, no FCS>
+└magic┘ver type mcs flags
 ```

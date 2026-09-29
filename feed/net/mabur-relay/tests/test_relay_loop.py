@@ -10,7 +10,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SRC = os.path.join(HERE, '..', 'src')
 RELAY = os.path.join(SRC, 'mabur-relay')
 
-FRAME, HELLO, TUNE, STATUS = 1, 2, 3, 4
+FRAME, HELLO, TUNE, STATUS, TX = 1, 2, 3, 4, 5
 
 def load_fixtures():
     d = open(os.path.join(HERE, 'fixtures', 'frames.pcap'), 'rb').read()
@@ -22,7 +22,7 @@ def load_fixtures():
 
 FX = load_fixtures()          # 0 qos, 1 probe, 2 foreign, 3 bad-fcs
 
-def hdr(t): return struct.pack('<HBB', 0x524D, 2, t)
+def hdr(t): return struct.pack('<HBB', 0x524D, 3, t)
 def hello(): return hdr(HELLO)
 def tune(tid, ch, sec): return hdr(TUNE) + struct.pack('<HBB', tid, ch, sec)
 
@@ -31,15 +31,16 @@ def dot11(f): return f[rt_len(f):-4]      # fixtures carry radiotap FCS flag 0x1
 
 def parse(msg):
     magic, ver, t = struct.unpack('<HBB', msg[:4])
-    assert magic == 0x524D and ver == 2, msg[:4]
+    assert magic == 0x524D and ver == 3, msg[:4]
     if t == FRAME:
         seq, ch, sec, fl, mcs, r0, r1, n0, n1, tsf = struct.unpack('<IBBBBbbbbI', msg[4:20])
         return ('F', dict(seq=seq, ch=ch, sec=sec, flags=fl, mcs=mcs,
                            rssi=(r0, r1), noise=(n0, n1), tsf=tsf, body=msg[20:]))
     if t == STATUS:
-        f = struct.unpack('<HBBBBBIIIIII', msg[4:35])
+        f = struct.unpack('<HBBBBBIIIIIIIII', msg[4:47])
         keys = ['tune_id', 'state', 'ch', 'sec', 'owner', 'you_own',
-                'rx', 'fwd', 'foreign', 'bad_fcs', 'your_drops', 'uptime_s']
+                'rx', 'fwd', 'foreign', 'bad_fcs', 'your_drops', 'uptime_s',
+                'tx', 'tx_fail', 'tx_refused']
         return ('S', dict(zip(keys, f)))
     return ('?', t)
 

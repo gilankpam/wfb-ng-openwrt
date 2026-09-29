@@ -34,7 +34,13 @@ size_t mr_pack_status(uint8_t *out, const struct mr_status *s) {
   out[6] = s->state; out[7] = s->channel; out[8] = s->sec; out[9] = s->owner; out[10] = s->you_own;
   put32(out + 11, s->rx); put32(out + 15, s->fwd); put32(out + 19, s->foreign);
   put32(out + 23, s->bad_fcs); put32(out + 27, s->your_drops); put32(out + 31, s->uptime_s);
+  put32(out + 35, s->tx); put32(out + 39, s->tx_fail); put32(out + 43, s->tx_refused);
   return MR_STATUS_LEN;
+}
+
+size_t mr_pack_tx_hdr(uint8_t *out, uint8_t mcs, uint8_t flags) {
+  put_hdr(out, MR_TX); out[4] = mcs; out[5] = flags;
+  return MR_TX_HDR_LEN;
 }
 
 int mr_parse_header(const uint8_t *b, size_t n, uint8_t *type) {
@@ -78,5 +84,16 @@ int mr_parse_status(const uint8_t *b, size_t n, struct mr_status *s) {
   s->state = b[6]; s->channel = b[7]; s->sec = b[8]; s->owner = b[9]; s->you_own = b[10];
   s->rx = get32(b + 11); s->fwd = get32(b + 15); s->foreign = get32(b + 19);
   s->bad_fcs = get32(b + 23); s->your_drops = get32(b + 27); s->uptime_s = get32(b + 31);
+  s->tx = get32(b + 35); s->tx_fail = get32(b + 39); s->tx_refused = get32(b + 43);
+  return MR_OK;
+}
+
+int mr_parse_tx(const uint8_t *b, size_t n, struct mr_tx *t) {
+  int rc = expect(b, n, MR_TX, MR_TX_HDR_LEN);
+  if (rc != MR_OK) return rc;
+  size_t dl = n - MR_TX_HDR_LEN;
+  if (b[4] > 7 || (b[5] & ~MR_TX_FLAGS_ALL) || dl < MR_TX_DOT11_MIN || dl > MR_TX_DOT11_MAX)
+    return MR_EINVAL;
+  t->mcs = b[4]; t->flags = b[5]; t->d = b + MR_TX_HDR_LEN; t->dl = dl;
   return MR_OK;
 }
