@@ -292,6 +292,15 @@ class V2Tests(RelayTestBase):
         fr = u.frames(u.recv_all())
         self.assertEqual(fr[0]['body'], tiny[rt_len(tiny):])
 
+    def test_ws_batch_order(self):
+        u, w = Udp(self.r), Ws(self.r)
+        u.send(hello()); w.send(hello()); time.sleep(0.1); u.recv_all(0.1); w.recv_all(0.1)
+        self.r.inject([FX[0]] * 200)
+        fu, fw = u.frames(u.recv_all(0.5)), w.frames(w.recv_all(0.5))
+        self.assertEqual(len(fu), 200); self.assertEqual(len(fw), 200)
+        su = [f['seq'] for f in fu]; sw = [f['seq'] for f in fw]
+        self.assertEqual(su, list(range(su[0], su[0] + 200))); self.assertEqual(sw, su)
+
 import base64, hashlib
 
 class Ws:

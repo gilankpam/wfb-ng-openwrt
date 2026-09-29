@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/uio.h>
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <syslog.h>
@@ -209,10 +210,23 @@ static void handle_tune(int kind, int idx, const struct mr_tune *t) {
 
 /* ---------- RX ---------- */
 
-static void ws_send_frame(const uint8_t *hdr, const uint8_t *pkt, size_t len);   /* Task 6 */
+/* Batching (Task 4): one rx_drain() pass fills these, then flush_batch()
+ * sends the whole pass to each subscriber in one sendmmsg()/writev() call.
+ * RX buffers must stay valid until the flush, hence one slot per frame
+ * rather than a single reused buffer. Both are file-scope statics (like the
+ * old per-call static buf[]) rather than stack arrays: 64 * 4096 B would be
+ * a heavy stack frame on the CPE's MIPS stack. Single-threaded, so reuse
+ * across rx_drain() calls is safe. */
+static uint8_t rxbuf[RX_BATCH][RX_MAX];
+static struct { uint8_t hdr[MR_FRAME_HDR_LEN]; const uint8_t *d; size_t dl; } batch[RX_BATCH];
 
-static void forward(const uint8_t *pkt, size_t len, const struct rtap_info *ri) {
-  uint8_t hdr[MR_FRAME_HDR_LEN];
+static void flush_batch(int nb);   /* defined after ws_enqueue/ws_flush below */
+
+/* Packs one frame's header and appends {hdr, dot11 pointer/len} to batch[];
+ * does not send. Counters (fwd/bad_fcs) and seq assignment happen here,
+ * once per forwarded frame, same as the old per-frame forward(). */
+static void batch_append(int *nb, const uint8_t *pkt, size_t len, const struct rtap_info *ri) {
+  int i = *nb;
   R.fwd++;
   if (ri->bad_fcs) R.bad_fcs++;
   size_t dl = len - ri->rt_len;
@@ -222,40 +236,32 @@ static void forward(const uint8_t *pkt, size_t len, const struct rtap_info *ri) 
   struct mr_frame_meta fm = {R.seq++, (uint8_t)(R.tn.busy ? 0 : R.tn.channel), R.tn.sec,
                              base_flags, ri->mcs,
                              {ri->rssi[0], ri->rssi[1]}, {ri->noise[0], ri->noise[1]}, ri->tsf_lo};
-  mr_pack_frame_hdr(hdr, &fm);
-  for (int i = 0; i < MAX_UDP; i++) {
-    struct udp_sub *u = &R.udp[i];
-    if (!u->used) continue;
-    hdr[MR_FLAGS_OFFSET] = (uint8_t)(base_flags | (u->dropped ? MR_FLAG_DROPPED : 0));
-    struct iovec iov[2] = {{hdr, sizeof hdr}, {(void *)d, dl}};
-    struct msghdr m = {0};
-    m.msg_name = &u->addr; m.msg_namelen = sizeof u->addr; m.msg_iov = iov; m.msg_iovlen = 2;
-    if (sendmsg(R.udp_fd, &m, MSG_DONTWAIT) < 0) { u->drops++; u->dropped = 1; }
-    else u->dropped = 0;
-  }
-  hdr[MR_FLAGS_OFFSET] = base_flags;
-  ws_send_frame(hdr, d, dl);
+  mr_pack_frame_hdr(batch[i].hdr, &fm);
+  batch[i].d = d; batch[i].dl = dl;
+  *nb = i + 1;
 }
 
 static int rx_drain(void) {
-  static uint8_t buf[RX_MAX];
+  int nb = 0;
   for (int i = 0; i < RX_BATCH; i++) {
-    ssize_t n = recv(R.rx_fd, buf, sizeof buf, MSG_DONTWAIT | MSG_TRUNC);
+    uint8_t *buf = rxbuf[i];
+    ssize_t n = recv(R.rx_fd, buf, sizeof rxbuf[i], MSG_DONTWAIT | MSG_TRUNC);
     if (n < 0) {
-      if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) return 0;
+      if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) break;
       if (errno == ENETDOWN || errno == ENODEV || errno == ENXIO) {
         syslog(LOG_ERR, "rx: %s gone (%s)", R.cfg->mon, strerror(errno));
-        return -1;
+        return -1;   /* fatal: caller exits the process, nothing to flush */
       }
-      return 0;
+      break;
     }
     R.rx++;
-    if ((size_t)n > sizeof buf) { R.malformed++; continue; }
+    if ((size_t)n > sizeof rxbuf[i]) { R.malformed++; continue; }
     struct filter_result f = filter_frame(buf, (size_t)n);
     if (f.v == FV_MALFORMED) R.malformed++;
     else if (f.v == FV_FOREIGN) R.foreign++;
-    else forward(buf, (size_t)n, &f.ri);
+    else batch_append(&nb, buf, (size_t)n, &f.ri);
   }
+  flush_batch(nb);
   return 0;
 }
 
@@ -380,15 +386,32 @@ static int ws_enqueue(int i, const uint8_t *a, size_t al, const uint8_t *b, size
   return 0;
 }
 
+/* writev() the whole pending queue in one syscall instead of one send() per
+ * slot. SIGPIPE is ignored process-wide (main.c), so a peer RST just gets us
+ * EPIPE here, same as the old send(..., MSG_NOSIGNAL). */
 static void ws_flush(int i) {
   struct ws_client *c = &R.ws[i];
   while (c->q_count) {
-    struct ws_slot *s = &c->q[c->q_head];
-    ssize_t n = send(c->fd, s->data + c->q_off, s->len - c->q_off, MSG_DONTWAIT | MSG_NOSIGNAL);
+    int cnt = c->q_count;   /* q_count never exceeds WS_QCAP */
+    struct iovec iov[WS_QCAP];
+    size_t total = 0;
+    for (int k = 0; k < cnt; k++) {
+      struct ws_slot *s = &c->q[(c->q_head + k) % WS_QCAP];
+      size_t off = (k == 0) ? c->q_off : 0;
+      iov[k].iov_base = s->data + off;
+      iov[k].iov_len = s->len - off;
+      total += iov[k].iov_len;
+    }
+    ssize_t n = writev(c->fd, iov, cnt);
     if (n < 0) { if (errno == EAGAIN || errno == EWOULDBLOCK) return; ws_close(i); return; }
-    c->q_off += (size_t)n;
-    if (c->q_off < s->len) return;
-    c->q_off = 0; c->q_head = (c->q_head + 1) % WS_QCAP; c->q_count--;
+    size_t rem = (size_t)n;
+    while (rem > 0 && c->q_count) {
+      struct ws_slot *s = &c->q[c->q_head];
+      size_t avail = s->len - c->q_off;
+      if (rem < avail) { c->q_off += rem; rem = 0; }
+      else { rem -= avail; c->q_off = 0; c->q_head = (c->q_head + 1) % WS_QCAP; c->q_count--; }
+    }
+    if ((size_t)n < total) return;   /* partial write: retry on next POLLOUT */
   }
 }
 
@@ -417,17 +440,58 @@ static struct owner ws_oldest(void) {
   return o;
 }
 
-static void ws_send_frame(const uint8_t *hdr, const uint8_t *pkt, size_t len) {
+/* Batched sends for one rx_drain() pass (Task 4). UDP: one sendmmsg() per
+ * subscriber carrying all nb frames; only frame 0 carries that subscriber's
+ * pending MR_FLAG_DROPPED (the bit means "since your previous *delivered*
+ * frame", and frame 0 of this batch is that next delivered frame). A short
+ * send (s < nb, including s < 0 treated as 0) counts the rest as dropped and
+ * arms the bit for the next batch; a full send clears it. WS: enqueue every
+ * frame (same per-client drop/flag bookkeeping as before) without flushing,
+ * then one writev()-based ws_flush() per client after the whole pass. */
+static void flush_udp(int nb) {
+  if (nb == 0) return;
+  static uint8_t hdrs[RX_BATCH][MR_FRAME_HDR_LEN];
+  static struct iovec iov[RX_BATCH][2];
+  static struct mmsghdr mm[RX_BATCH];
+  for (int ui = 0; ui < MAX_UDP; ui++) {
+    struct udp_sub *u = &R.udp[ui];
+    if (!u->used) continue;
+    for (int i = 0; i < nb; i++) {
+      memcpy(hdrs[i], batch[i].hdr, MR_FRAME_HDR_LEN);
+      if (i == 0 && u->dropped) hdrs[i][MR_FLAGS_OFFSET] |= MR_FLAG_DROPPED;
+      iov[i][0].iov_base = hdrs[i];             iov[i][0].iov_len = MR_FRAME_HDR_LEN;
+      iov[i][1].iov_base = (void *)batch[i].d;  iov[i][1].iov_len = batch[i].dl;
+      memset(&mm[i], 0, sizeof mm[i]);
+      mm[i].msg_hdr.msg_name = &u->addr;
+      mm[i].msg_hdr.msg_namelen = sizeof u->addr;
+      mm[i].msg_hdr.msg_iov = iov[i];
+      mm[i].msg_hdr.msg_iovlen = 2;
+    }
+    int s = sendmmsg(R.udp_fd, mm, (unsigned)nb, MSG_DONTWAIT);
+    if (s < 0) s = 0;
+    if (s < nb) { u->drops += (uint32_t)(nb - s); u->dropped = 1; }
+    else u->dropped = 0;
+  }
+}
+
+static void flush_ws(int nb) {
   uint8_t h[MR_FRAME_HDR_LEN];
   for (int i = 0; i < MAX_WS; i++) {
     struct ws_client *c = &R.ws[i];
     if (!c->used || !c->upgraded) continue;
-    memcpy(h, hdr, sizeof h);
-    if (c->dropped) h[MR_FLAGS_OFFSET] |= MR_FLAG_DROPPED;
-    if (ws_enqueue(i, h, sizeof h, pkt, len, 0) < 0) { c->drops++; c->dropped = 1; }
-    else c->dropped = 0;
+    for (int k = 0; k < nb; k++) {
+      memcpy(h, batch[k].hdr, sizeof h);
+      if (c->dropped) h[MR_FLAGS_OFFSET] |= MR_FLAG_DROPPED;
+      if (ws_enqueue(i, h, sizeof h, batch[k].d, batch[k].dl, 0) < 0) { c->drops++; c->dropped = 1; }
+      else c->dropped = 0;
+    }
     ws_flush(i);
   }
+}
+
+static void flush_batch(int nb) {
+  flush_udp(nb);
+  flush_ws(nb);
 }
 
 static void ws_touch(int idx) { R.ws[idx].last_hello_ms = now_ms(); }
@@ -555,6 +619,13 @@ static int open_rx(void) {
 static int open_udp(void) {
   int fd = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
   if (fd < 0) return -1;
+#ifdef SO_NO_CHECK
+  /* Skip UDP checksums on outgoing video/telemetry: this LAN hop never
+   * corrupts payload without the radio link already having discarded the
+   * frame, so the checksum is pure per-packet CPU cost on the CPE. */
+  int one = 1;
+  setsockopt(fd, SOL_SOCKET, SO_NO_CHECK, &one, sizeof one);
+#endif
   int pmtu = IP_PMTUDISC_DONT;
   /* No SO_REUSEADDR: two relays racing for the same UDP port must fail one
    * of them at bind(), not silently share it. */
