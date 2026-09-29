@@ -1,3 +1,4 @@
+#define _GNU_SOURCE   /* SOCK_CLOEXEC, accept4, pipe2 (musl has them under -std=gnu99 too) */
 #include "relay.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -63,7 +64,7 @@ static struct {
   struct ws_client ws[MAX_WS];
   struct tune_st tn;
   struct owner owner;
-  uint32_t seq, rx, fwd, foreign, bad_fcs, malformed, bad_msg, refused;
+  uint32_t seq, rx, fwd, foreign, bad_fcs, malformed, bad_msg, refused, rxdrop;
   uint64_t start_ms;
 } R;
 
@@ -76,6 +77,19 @@ static uint64_t now_ms(void) {
 static void on_sigchld(int s) { (void)s; int e = errno; (void)!write(R.sig_wr, "c", 1); errno = e; }
 
 static int set_nonblock(int fd) { return fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK); }
+
+/* FORCE bypasses the rmem_max/wmem_max admin cap (root/CAP_NET_ADMIN only);
+ * fall back to the plain (capped) setsockopt so host tests (run as a normal
+ * user, EPERM on FORCE) still get a real, just smaller, buffer. */
+static void set_rcvbuf(int fd, int bytes) {
+  if (setsockopt(fd, SOL_SOCKET, SO_RCVBUFFORCE, &bytes, sizeof bytes) < 0)
+    setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &bytes, sizeof bytes);
+}
+
+static void set_sndbuf(int fd, int bytes) {
+  if (setsockopt(fd, SOL_SOCKET, SO_SNDBUFFORCE, &bytes, sizeof bytes) < 0)
+    setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &bytes, sizeof bytes);
+}
 
 /* ---------- status ---------- */
 
@@ -412,7 +426,7 @@ static void ws_send_frame(const uint8_t *hdr, const uint8_t *pkt, size_t len) {
 static void ws_touch(int idx) { R.ws[idx].last_hello_ms = now_ms(); }
 
 static int ws_open_listener(void) {
-  int fd = socket(AF_INET, SOCK_STREAM, 0);
+  int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
   if (fd < 0) return -1;
   int one = 1;
   setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
@@ -425,7 +439,7 @@ static int ws_open_listener(void) {
 
 static void ws_accept(void) {
   for (;;) {
-    int fd = accept(R.ws_fd, NULL, NULL);
+    int fd = accept4(R.ws_fd, NULL, NULL, SOCK_CLOEXEC);
     if (fd < 0) return;
     int i;
     for (i = 0; i < MAX_WS && R.ws[i].used; i++) {}
@@ -509,7 +523,7 @@ static void reap_ws(void) {
 
 static int open_rx(void) {
   if (R.cfg->rx_unix) {
-    int fd = socket(AF_UNIX, SOCK_DGRAM, 0);
+    int fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
     struct sockaddr_un a = {0};
     a.sun_family = AF_UNIX;
     snprintf(a.sun_path, sizeof a.sun_path, "%s", R.cfg->rx_unix);
@@ -517,23 +531,27 @@ static int open_rx(void) {
     if (fd < 0 || bind(fd, (struct sockaddr *)&a, sizeof a) < 0) return -1;
     return fd;
   }
-  int fd = socket(AF_PACKET, SOCK_RAW, htons(ETH_P_ALL));
+  /* protocol 0 at socket() time: the socket receives nothing until bind()
+   * below switches it to ETH_P_ALL, so there is no window where frames can
+   * arrive (and be queued against the default, tiny rcvbuf) before this
+   * function has finished setting the real buffer size. */
+  int fd = socket(AF_PACKET, SOCK_RAW | SOCK_CLOEXEC, 0);
   if (fd < 0) return -1;
   struct sockaddr_ll ll = {0};
   ll.sll_family = AF_PACKET; ll.sll_protocol = htons(ETH_P_ALL);
   ll.sll_ifindex = (int)if_nametoindex(R.cfg->mon);
   if (ll.sll_ifindex == 0 || bind(fd, (struct sockaddr *)&ll, sizeof ll) < 0) { close(fd); return -1; }
-  int rcv = 1 << 20;
-  setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcv, sizeof rcv);
+  set_rcvbuf(fd, 1 << 20);
   return fd;
 }
 
 static int open_udp(void) {
-  int fd = socket(AF_INET, SOCK_DGRAM, 0);
+  int fd = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
   if (fd < 0) return -1;
-  int one = 1, snd = 1 << 20, pmtu = IP_PMTUDISC_DONT;
-  setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
-  setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &snd, sizeof snd);
+  int pmtu = IP_PMTUDISC_DONT;
+  /* No SO_REUSEADDR: two relays racing for the same UDP port must fail one
+   * of them at bind(), not silently share it. */
+  set_sndbuf(fd, 1 << 20);
   setsockopt(fd, IPPROTO_IP, IP_MTU_DISCOVER, &pmtu, sizeof pmtu);   /* fragment, never DF */
   struct sockaddr_in a = {0};
   a.sin_family = AF_INET; a.sin_port = htons(R.cfg->udp_port); a.sin_addr.s_addr = htonl(INADDR_ANY);
@@ -545,7 +563,7 @@ int relay_run(const struct relay_cfg *cfg) {
   memset(&R, 0, sizeof R);
   R.cfg = cfg; R.start_ms = now_ms(); R.owner.idx = -1;
   int pp[2];
-  if (pipe(pp) < 0) return 1;
+  if (pipe2(pp, O_CLOEXEC) < 0) return 1;
   R.sig_rd = pp[0]; R.sig_wr = pp[1];
   set_nonblock(R.sig_rd); set_nonblock(R.sig_wr);
   struct sigaction sa = {0};
@@ -555,8 +573,12 @@ int relay_run(const struct relay_cfg *cfg) {
   if (tune_readback(cfg->mon, &R.tn.channel, &R.tn.sec) != 0) {
     R.tn.channel = cfg->boot_channel; R.tn.sec = cfg->boot_sec;
   }
-  R.rx_fd = open_rx(); R.udp_fd = open_udp(); R.ws_fd = ws_open_listener();
-  if (R.rx_fd < 0 || R.udp_fd < 0) { syslog(LOG_ERR, "socket setup failed: %s", strerror(errno)); return 1; }
+  R.rx_fd = open_rx();
+  if (R.rx_fd < 0) { syslog(LOG_ERR, "rx socket setup failed: %s", strerror(errno)); return 1; }
+  R.udp_fd = open_udp();
+  if (R.udp_fd < 0) { syslog(LOG_ERR, "udp socket setup failed: %s", strerror(errno)); return 1; }
+  R.ws_fd = ws_open_listener();
+  if (R.ws_fd < 0) { syslog(LOG_ERR, "ws socket setup failed: %s", strerror(errno)); return 1; }
   syslog(LOG_INFO, "up: %s on %u %s, udp %u ws %u", cfg->mon, (unsigned)R.tn.channel,
          tune_sec_str(R.tn.sec), cfg->udp_port, cfg->ws_port);
 
@@ -570,19 +592,32 @@ int relay_run(const struct relay_cfg *cfg) {
     int ws_first = n;
     n += ws_poll_fill(p + n);
     if (poll(p, (nfds_t)n, 100) < 0 && errno != EINTR) return 1;
-    if (p[2].revents & POLLIN) reap_child();
+    /* RX before reap_child/finish_tune: frames the kernel queued before a
+     * retune completed must still be stamped rx_channel=0 (the retune-in-
+     * flight value in effect when they arrived), not the new channel that
+     * finish_tune() is about to set. */
     if ((p[0].revents & POLLIN) && rx_drain() < 0) return 1;
     if (p[0].revents & (POLLERR | POLLHUP)) { syslog(LOG_ERR, "rx socket error"); return 1; }
+    if (p[2].revents & POLLIN) reap_child();
     if (p[1].revents & POLLIN) udp_drain();
     ws_poll_handle(p + ws_first, n - ws_first);
     check_watchdog();
     reap_udp();
     reap_ws();
     update_owner();
-    if (cfg->verbose && now_ms() - last_log >= 1000) {
+    if (now_ms() - last_log >= 1000) {
       last_log = now_ms();
-      syslog(LOG_DEBUG, "rx %u fwd %u foreign %u badfcs %u malformed %u badmsg %u refused %u",
-             R.rx, R.fwd, R.foreign, R.bad_fcs, R.malformed, R.bad_msg, R.refused);
+      if (!cfg->rx_unix) {
+        struct tpacket_stats st;
+        socklen_t sl = sizeof st;
+        if (getsockopt(R.rx_fd, SOL_PACKET, PACKET_STATISTICS, &st, &sl) == 0 && st.tp_drops) {
+          R.rxdrop += st.tp_drops;
+          syslog(LOG_WARNING, "rx socket dropped %u frames", st.tp_drops);
+        }
+      }
+      if (cfg->verbose)
+        syslog(LOG_DEBUG, "rx %u fwd %u foreign %u badfcs %u malformed %u badmsg %u refused %u rxdrop %u",
+               R.rx, R.fwd, R.foreign, R.bad_fcs, R.malformed, R.bad_msg, R.refused, R.rxdrop);
     }
   }
 }

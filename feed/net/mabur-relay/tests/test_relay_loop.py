@@ -43,6 +43,18 @@ def free_port(kind):
     s = socket.socket(socket.AF_INET, kind); s.bind(('127.0.0.1', 0))
     p = s.getsockname()[1]; s.close(); return p
 
+def spawn_second(relay, udp_port, ws_port):
+    """A second relay process sharing relay's iw stub, with its own rx socket.
+    Returns the Popen; caller must .wait()/.kill() and clean up its tmpdir."""
+    d = tempfile.mkdtemp(prefix='mrelay2')
+    bindir = os.path.join(relay.dir, 'bin')
+    env = dict(os.environ, PATH=bindir + ':' + os.environ['PATH'], IW_STUB_DIR=relay.dir)
+    proc = subprocess.Popen(
+        [RELAY, '-i', 'mon0', '-u', str(udp_port), '-w', str(ws_port),
+         '-c', '136', '-s', '2', '-S', os.path.join(d, 'state'),
+         '-R', os.path.join(d, 'rx.sock')], env=env)
+    return proc, d
+
 class Relay:
     def __init__(self):
         self.dir = tempfile.mkdtemp(prefix='mrelay')
@@ -228,6 +240,30 @@ class UdpTests(RelayTestBase):
         self.assertEqual(st[-1]['you_own'], 1)
         b.send(tune(14, 149, 1))
         self.assertEqual(b.statuses(b.recv_all(0.5))[-1]['state'], 0)
+
+    def test_second_relay_same_ws_port_exits(self):
+        # F2: a fatal ws_open_listener() must fail the process, not run with
+        # WS silently disabled. Fresh UDP port so only the WS bind collides.
+        proc, d = spawn_second(self.r, free_port(socket.SOCK_DGRAM), self.r.ws_port)
+        try:
+            rc = proc.wait(timeout=2)
+            self.assertNotEqual(rc, 0)
+        finally:
+            if proc.poll() is None:
+                proc.kill(); proc.wait(5)
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_second_relay_same_udp_port_exits(self):
+        # F3: no SO_REUSEADDR on the UDP socket, so a colliding bind is fatal.
+        # Fresh WS port so only the UDP bind collides.
+        proc, d = spawn_second(self.r, self.r.udp_port, free_port(socket.SOCK_STREAM))
+        try:
+            rc = proc.wait(timeout=2)
+            self.assertNotEqual(rc, 0)
+        finally:
+            if proc.poll() is None:
+                proc.kill(); proc.wait(5)
+            shutil.rmtree(d, ignore_errors=True)
 
 import base64, hashlib
 
