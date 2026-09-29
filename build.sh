@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the minimal wfb-ng CPE510 firmware in two Docker stages:
+# Build the minimal mabur-relay CPE510 firmware in two Docker stages:
 #   package  -> OpenWrt SDK compiles the mabur-relay .apk (+ qemu BE self-test)
 #   image    -> OpenWrt ImageBuilder assembles the per-variant CPE510 images
 # All inputs are pinned in versions.env.
