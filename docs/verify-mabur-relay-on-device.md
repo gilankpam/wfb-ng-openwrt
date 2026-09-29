@@ -205,3 +205,54 @@ run: drone low-power disabled (restored after), link 136 HT40- at mcs4/40,
 - UDP + WS: both subscribers get the full stream with zero loss, but at 93 %
   CPU there is almost no headroom (a higher bitrate would tip it over).
 
+## TX mode (2026-09-29)
+
+Protocol v3 (`docs/mabur-relay-protocol.md`) adds `TX` (type 5, client →
+relay) and three `STATUS` counters (`tx`, `tx_fail`, `tx_refused`). CPE
+flashed from relay `master` `44f0190`. Setup: CPE on host USB-Ethernet
+(192.168.1.101 ↔ 192.168.1.1); drone `.152` on ch136 HT40-; relay run with
+`-v` via the `RELAY_BIN` wrapper for the counters.
+
+### Step 1 — TX alone
+
+Native `webgs live --relay 192.168.1.1:8310 --mode gs --ch 136 --w 40 --secs
+60`, no other GS on air, drone `low_power` ON.
+
+- SESSION + `peer_acked` in the first second; ladder climbed to rung 4
+  (mcs4/40) by ~15 s.
+- `drone_rcf_rx / rcf_sent` = 1129 / 1151 = **98.1 %**; relay `gaps` 0;
+  relay `tx` 1211, `tx_fail` 0, `tx_refused` 0; RTT ~5-7 ms.
+- Proves ath9k honours injected MCS0 + LDPC + STBC (the drone decodes
+  them).
+- **Own-echo**: `txecho` == 2 × `tx` exactly (2422 vs 1211). Each injected
+  frame comes back twice on `mon0`: the AF_PACKET `PACKET_OUTGOING` copy
+  and mac80211's TX-status report, both carrying radiotap `TX_FLAGS`.
+  Filter **KEPT** — without it every RCF would be forwarded back to the
+  client twice as RX.
+
+### Steps 2-3 — A/B + CPE load
+
+Drone `low_power` OFF, full rate, ch136/40, mcs4.
+
+| Leg | Path | RCF heard | Rung | Notes |
+|---|---|---|---|---|
+| 1 | USB (`maburgs` on Radxa GS, its RTL cards) | 94.5 % | mcs4/40 | sideport `drone.rcf.rx_pps` / Σ cards `tx_pps` |
+| 2 | CPE relay (native `webgs --relay`) | 100.4 % | 3-4 | `drone_rcf_rx`/`rcf_sent` after the first 10 s |
+| 3 | CPE relay | 100.7 % | 4 | |
+| 4 | USB (`maburgs`) | 94.3 % | mcs4/40 | |
+
+- **PASS**: relay ≥ USB (bar was "within 5 points"). Caveat: USB
+  denominator counts every GS TX frame, relay counts RCFs only; >100 % is
+  telemetry-counter lag at the window edges.
+- CPE at full rate (3170-3250 frames/s forwarded over UDP + ~20 TX/s): CPU
+  53.5-59.6 % (5 s windows), `relay_gaps` 0, `rxdrop` 0, `tx_fail` 0; RTT
+  7.5-8.7 ms. **PASS** (≤ 75 %). Same as the RX-only UDP baseline (58 %,
+  above) — TX cost is negligible.
+
+### Not measured on hardware
+
+The browser path (page → WebSocket → relay Worker → ring → core): no
+browser in the session. The native CLI uses the same `RelayLink`/
+`RelayClient` over UDP. WS-mode full-rate CPE load was 71 % RX-only
+(earlier run, above); not re-measured with TX.
+
