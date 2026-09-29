@@ -133,10 +133,28 @@ exercised.
 
 **Open pre-merge items:**
 
-1. Runbook step 1 (flash and boot check) has not actually been run against a
-   `sysupgrade`-flashed image — this acceptance run used the hand-run binary
-   described above, not the real boot/procd path.
+1. ~~Runbook step 1~~ — **done 2026-09-29**, see "Flash + boot check" below.
 2. A full-rate run has not been done: drone on a high rung (~3,000 frames/s,
    not this run's ~110 frames/s), checking relay `seq` gaps, CPE CPU, and the
    new `rxdrop` counter (F1) under that load — the IP-fragment loss and RX
    socket buffer sizing this fix wave targets are only exercised at rate.
+
+## Flash + boot check 2026-09-29
+
+CPE510 v3 flashed with `sysupgrade -n` from master `b0a3039`
+(`openwrt-25.12.4-ath79-generic-tplink_cpe510-v3-squashfs-sysupgrade.bin`,
+7,803,748 B; `sysupgrade -T` OK). No drone on air for this check.
+
+- Boot: `S99mabur-relay` + `K10mabur-relay` in `/etc/rc.d`; `mon0` type monitor
+  on 136 HT40- (boot channel); `logread`: `up: mon0 on 136 HT40-, udp 8310 ws 8311`;
+  no `wfb_rx`. **PASS**
+- Kmods: `kmod-ath9k` and `kmod-mac80211` both `-r4` (our patched builds). **PASS**
+- Respawn: `kill -9` of the daemon → procd restarted it (new pid) within 7 s. **PASS**
+- `/etc/init.d/mabur-relay stop` → daemon gone and `mon0` removed; `start` →
+  daemon up, `mon0` back on 136 HT40-. **PASS**
+- Live `HELLO` from the host → 35-byte `STATUS` (state 0, ch 136, sec 2, owner UDP,
+  you_own 1). **PASS**
+- Footprint: 29.7 MB RAM free, overlay 2.3 MB free.
+
+Still open: the full-rate run (item 2 above).
+
