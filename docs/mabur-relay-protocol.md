@@ -50,10 +50,34 @@ Field semantics:
   id, even while another retune is in flight.
 - `STATUS` is sent to all subscribers on retune start, completion/failure and
   ownership change, and to the sender in reply to every `HELLO`.
+- `STATUS`'s `u32` counters (`rx`, `fwd`, `foreign`, `bad_fcs`, `your_drops`,
+  `uptime_s`) wrap at 2^32 (~15 days at full video rate); a client comparing
+  two readings must compute the delta modulo 2^32, not by plain subtraction
+  with a sign check.
+- A HELLO refused because the subscriber table is full (`state=3`) carries the
+  relay's current/last `tune_id` (the same value a `STATUS` would carry for
+  state 0/1/2) — `HELLO` has no request id of its own for the refusal to echo
+  back, unlike a refused `TUNE`, which carries the request's own `tune_id`.
+- A pending `TUNE` that is replaced by a newer one before it runs (see retune
+  step 6 below) never gets its own `STATUS`: only the request that is
+  actually latest-and-executing generates `state=1`/`0`/`2` traffic. A client
+  that sent an intermediate `TUNE` in a rapid sequence should not wait for a
+  `STATUS` carrying that request's `tune_id` — it will not arrive.
 
 **Validation:** wrong magic, a short message, or unknown type → dropped and
 counted. `ver` ≠ 1 → dropped and counted; the client learns the relay's version
 from any `STATUS` (it answers every `HELLO`). No compatibility shims.
+
+**RX-socket drops.** The relay's AF_PACKET receive socket can drop frames in
+the kernel before `mabur-relay` ever reads them (burst beyond `SO_RCVBUF`,
+even after the 1 MiB `SO_RCVBUFFORCE`/`SO_RCVBUF` sizing). These drops are
+**not visible to clients in-band** — there is no wire field for them, and to
+a client they look identical to air loss visible in the dot11 sequence number
+inside the frame. They are counted (`PACKET_STATISTICS`'s `tp_drops`,
+accumulated into the relay's own `rxdrop` counter) and logged on the device
+only: the `-v` per-second debug line includes `rxdrop N`, and each nonzero
+poll additionally logs `rx socket dropped N frames` at `LOG_WARNING`. Diagnose
+with `logread | grep mabur-relay` on the CPE, not from client-side counters.
 
 **MTU:** 11 B relay header + 54 B radiotap + 1,435 B frame exceeds a 1,472 B
 UDP payload, so large video frames travel as **two IP fragments** on UDP. On
@@ -97,11 +121,28 @@ the CPE where the link was).
 5. Watchdog: a child still running after 1 s is killed → `state=2`.
 6. A `TUNE` arriving mid-retune becomes the single pending request (a newer
    one replaces it) and runs when the current one finishes — rapid hop
-   sequences end on the latest target.
+   sequences end on the latest target. A replaced pending request is simply
+   discarded: it never gets a `STATUS` of its own (see the field-semantics
+   note above).
 
 ## Client obligations
 
 - Send `HELLO` every 500 ms; a silent client is dropped after 2 s.
+- After a client restarts (typically a new UDP socket, so a new ephemeral
+  source port), its *old* `addr:port` entry is a distinct subscriber slot
+  that the relay does not know is gone: it keeps its subscriber slot, and
+  keeps tune ownership if it held it, until the relay reaps it (≤ 2 s
+  without a `HELLO`). A `TUNE` sent by the newly-started client during that
+  window is refused (`state=3`) even though it is, from the operator's point
+  of view, the same logical client re-owning the link. Retry on `state=3`
+  rather than treating it as a hard refusal.
+- The `FRAME` payload's trailing bytes are the dot11 frame **as captured**,
+  including its 4-byte FCS when the source radiotap's `flags` field has bit
+  4 (`0x10`, "frame includes FCS") set — ath9k sets this in monitor mode.
+  Strip the last 4 bytes before parsing the mabur body when that bit is set;
+  otherwise the body ends at the frame's natural length. The relay does not
+  strip it itself, since radiotap `flags` is per-frame, before the FRAME
+  header the relay adds.
 - **WS subscription starts at the upgrade, not the first `HELLO`.** As soon as
   the WebSocket handshake completes, the client is a subscriber: it starts
   receiving `STATUS` and `FRAME` messages immediately, and — if it is the

@@ -113,7 +113,9 @@ config to revert.
 
 ## Acceptance 2026-09-29
 
-Bench run, relay executed by hand from CPE /tmp (not flashed per Ruling 3).
+Bench run: the relay binary was run by hand from `/tmp` on the CPE's old
+(wfb-ng) image; the `sysupgrade` + boot/procd path (step 1 above) was not
+exercised.
 
 **Setup:** CPE510 v3 on current wfb-ng firmware; mabur-relay cross-built from feat/mabur-relay 83cafad with 25.12.4 SDK toolchain (-Os, 31 KB); mon0 created by hand with `flags fcsfail otherbss`; channel 136 HT40−, drone in low-rate mode at ~110 frames/s. Host on CPE's LAN via USB NIC (192.168.1.101).
 
@@ -128,3 +130,13 @@ Bench run, relay executed by hand from CPE /tmp (not flashed per Ruling 3).
 **WS Spotter smoke test:** Python WS client in lieu of browser; handshake 101, 372 frames over 3 s. With `relayprobe.py` UDP subscriber still owning the tune, WS `TUNE` attempt → `STATUS state=3, tune_id 77, owner 1, you_own 0`, radio remained on 136 **PASS**.
 
 **Not exercised:** high-rate video (drone was at ~110 frames/s, so IP-fragment loss at full rate is unmeasured); sysupgrade flash and boot/procd path (user's step).
+
+**Open pre-merge items:**
+
+1. Runbook step 1 (flash and boot check) has not actually been run against a
+   `sysupgrade`-flashed image — this acceptance run used the hand-run binary
+   described above, not the real boot/procd path.
+2. A full-rate run has not been done: drone on a high rung (~3,000 frames/s,
+   not this run's ~110 frames/s), checking relay `seq` gaps, CPE CPU, and the
+   new `rxdrop` counter (F1) under that load — the IP-fragment loss and RX
+   socket buffer sizing this fix wave targets are only exercised at rate.
