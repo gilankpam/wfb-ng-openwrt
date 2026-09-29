@@ -26,7 +26,7 @@ jobs:
           df -h /
 
       - name: Load pinned versions into env
-        run: grep -E '^OPENWRT_' versions.env >> "$GITHUB_ENV"
+        run: grep -E '^(OPENWRT|WFB)_' versions.env >> "$GITHUB_ENV"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -68,12 +68,13 @@ jobs:
             echo "Rolling firmware build from commit \`${GITHUB_SHA}\`."
             echo
             echo "- OpenWrt: ${OPENWRT_VERSION} (${OPENWRT_TARGET}/${OPENWRT_SUBTARGET})"
+            echo "- wfb-ng: ${WFB_REPO} @ \`${WFB_COMMIT}\`"
             echo "- Built (UTC): $(date -u +%Y-%m-%dT%H:%M:%SZ)"
             echo
             echo "### Images"
             ( cd output && for f in *.bin; do printf -- '- `%s` (%s)\n' "$f" "$(du -h "$f" | cut -f1)"; done )
             echo
-            echo "> This image is a mabur RX relay: the CPE forwards mabur air frames to maburgs (UDP 8310) and the web GS (ws:// 8311)."
+            echo "> This image is a wfb-ng **cluster node**: it forwards raw 802.11 to an aggregator host that holds the key. No key ships in the image."
           } > release-notes.md
           cat release-notes.md
 

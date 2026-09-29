@@ -3,14 +3,14 @@
 # ImageBuilder's local package repo, builds one image per CPE510 profile,
 # copies results to /work/output, and asserts the size budget.
 #
-# OpenWrt 25.12 uses apk: dropping mabur-relay-*.apk into packages/ makes the IB
+# OpenWrt 25.12 uses apk: dropping wfb-ng-*.apk into packages/ makes the IB
 # regenerate packages.adb (apk mkndx) automatically; ADD_LOCAL_KEY=1 installs
 # the local signing pubkey into the image so the local package is trusted.
 set -eu
 cd /opt/ib
 
 mkdir -p packages
-cp /work/build/packages/mabur-relay-*.apk packages/
+cp /work/build/packages/wfb-ng-*.apk packages/
 # Our patched mac80211/ath9k kmods (PKG_RELEASE=4) override the stock -r1 ones.
 cp /work/build/packages/kmod-*.apk packages/
 
