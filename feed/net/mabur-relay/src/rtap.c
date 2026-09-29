@@ -62,6 +62,7 @@ int rtap_parse(const uint8_t *pkt, size_t len, struct rtap_info *ri) {
           case 5: sig = (int8_t)p[0]; break;
           case 6: noi = (int8_t)p[0]; break;
           case 11: ant = p[0]; break;
+          case 15: if (k == 0) ri->tx_echo = 1; break;
           case 19:
             if (k == 0) {
               uint8_t known = p[0], f = p[1];

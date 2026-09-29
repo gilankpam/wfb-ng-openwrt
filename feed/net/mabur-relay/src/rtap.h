@@ -19,6 +19,7 @@ struct rtap_info {
   uint8_t mcs;        /* RT_MCS_NONE if absent/unknown */
   uint8_t phy_flags;  /* RT_* bits */
   int8_t rssi[2], noise[2];  /* RT_ABSENT if absent */
+  int tx_echo;  /* first namespace carries TX_FLAGS: mac80211's report of our own injected frame */
 };
 
 /* 0 = ok (fields it could not reach stay at their "absent" defaults);

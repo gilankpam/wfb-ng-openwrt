@@ -8,6 +8,7 @@ static uint8_t *fr[8]; static size_t fl[8];
 static void t_rtap_fixtures(void) {
   struct rtap_info ri;
   CHECK_EQ(rtap_parse(fr[0], fl[0], &ri), 0);
+  CHECK_EQ(ri.tx_echo, 0);
   CHECK_EQ(ri.rt_len, 40); CHECK_EQ(ri.has_fcs, 1); CHECK_EQ(ri.bad_fcs, 0);
   CHECK_EQ(ri.tsf_lo, 86499716u); CHECK_EQ(ri.mcs, 4);
   CHECK_EQ(ri.phy_flags, RT_STBC);
