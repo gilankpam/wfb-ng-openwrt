@@ -301,6 +301,36 @@ class V2Tests(RelayTestBase):
         su = [f['seq'] for f in fu]; sw = [f['seq'] for f in fw]
         self.assertEqual(su, list(range(su[0], su[0] + 200))); self.assertEqual(sw, su)
 
+    def test_ws_full_pass_stall_does_not_starve_udp(self):
+        # F1: a WS client with a tiny SO_RCVBUF that never reads backs up
+        # until even a flush-and-retry can't enqueue for it; a single pass
+        # then charges the rest of that pass as drops in one step and stops
+        # touching that client (no further per-frame ws_flush/enqueue) for
+        # the rest of the pass. Regression target: the relay must still
+        # answer a UDP HELLO promptly, and the stalled client's own
+        # your_drops must reflect the drops once it does read.
+        u, w = Udp(self.r), Ws(self.r, rcvbuf=2048)
+        u.send(hello()); w.send(hello()); time.sleep(0.1); u.recv_all(0.1); w.recv_all(0.1)
+        self.r.inject([FX[0]] * 500)      # >> WS_QCAP (64); w never recv()s meanwhile
+        deadline = time.time() + 0.5
+        u.send(hello())
+        u.s.settimeout(0.5)
+        got_status = False
+        while time.time() < deadline:
+            try:
+                k, m = parse(u.s.recv(65536))
+            except socket.timeout:
+                break
+            if k == 'S':
+                got_status = True
+                break
+        self.assertTrue(got_status, "UDP HELLO reply did not arrive within 0.5 s")
+        u.recv_all(0.2)                   # drain the rest so it doesn't leak into other tests
+        w.send(hello())
+        wst = w.statuses(w.recv_all(0.5))
+        self.assertTrue(wst)
+        self.assertGreater(wst[-1]['your_drops'], 0)
+
 import base64, hashlib
 
 class Ws:

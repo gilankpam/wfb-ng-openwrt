@@ -27,11 +27,18 @@ int rtap_parse(const uint8_t *pkt, size_t len, struct rtap_info *ri) {
   uint32_t w[MAX_WORDS]; int nw = 0; size_t off = 4;
   for (;;) {
     if (off + 4 > rt || nw == MAX_WORDS) return -1;
-    w[nw] = le32(pkt + off); off += 4;
-    if (!(w[nw++] & W_EXT)) break;
+    uint32_t cur = le32(pkt + off); off += 4;
+    w[nw++] = cur;
+    if (!(cur & W_EXT)) break;
+    /* bit31 set but neither W_RT_NEXT nor W_VEND_NEXT: the next word would
+     * continue THIS SAME namespace into bits 32-63, which this parser has
+     * no field table for. Stop the present-word chain here (this word's
+     * own fields, bits 0-28, are still parsed below); no error. */
+    if (!(cur & (W_RT_NEXT | W_VEND_NEXT))) break;
   }
 
   int vendor = 0;               /* the current word describes a vendor namespace */
+  int8_t first_sig = RT_ABSENT, first_noi = RT_ABSENT;
   for (int k = 0; k < nw; k++) {
     if (vendor) {
       /* vendor namespace data: align 2, OUI(3) subns(1) skip_length(u16), data */
@@ -71,11 +78,18 @@ int rtap_parse(const uint8_t *pkt, size_t len, struct rtap_info *ri) {
       }
       if (k == 0) {
         if (sig != RT_ABSENT) ri->phy_flags |= RT_PHY_VALID;
+        first_sig = sig; first_noi = noi;
       } else if (ant == 0 || ant == 1) {
         ri->rssi[ant] = sig; ri->noise[ant] = noi;
       }
     }
     vendor = (w[k] & W_VEND_NEXT) != 0;
+  }
+  /* phy_valid (first namespace carried DBM_ANTSIGNAL) but no extended
+   * namespace assigned a per-chain reading: fall back to the combined
+   * signal/noise on chain 0 rather than leaving it absent. */
+  if ((ri->phy_flags & RT_PHY_VALID) && ri->rssi[0] == RT_ABSENT && ri->rssi[1] == RT_ABSENT) {
+    ri->rssi[0] = first_sig; ri->noise[0] = first_noi;
   }
   return 0;
 }

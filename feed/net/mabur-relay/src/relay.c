@@ -488,7 +488,15 @@ static void flush_ws(int nb) {
          * retry before counting a real drop. */
         ws_flush(i);
         if (!c->used) break;   /* ws_flush may have closed the client */
-        if (ws_enqueue(i, h, sizeof h, batch[k].d, batch[k].dl, 0) < 0) { c->drops++; c->dropped = 1; }
+        if (ws_enqueue(i, h, sizeof h, batch[k].d, batch[k].dl, 0) < 0) {
+          /* Still full after a flush-and-retry: this client is stalled
+           * for the rest of the pass. Charge every remaining frame
+           * (including this one) as a drop in one step and stop touching
+           * this client until the next pass, instead of repeating a
+           * doomed enqueue/flush per frame. */
+          c->drops += (uint32_t)(nb - k); c->dropped = 1;
+          break;
+        }
         else c->dropped = 0;
       } else c->dropped = 0;
     }

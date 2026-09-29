@@ -71,6 +71,51 @@ static void t_rtap_vendor_ns(void) {
   CHECK_EQ(rtap_parse(b, 64, &ri), -1);
 }
 
+/* F2: bit31 set on a present word but neither W_RT_NEXT (bit29) nor
+ * W_VEND_NEXT (bit30) means the *next* word would continue THIS SAME
+ * namespace into bits 32-63, which this parser has no field table for.
+ * It must stop the present-word chain there (word 0's own fields still
+ * parsed, return 0) instead of misreading that continuation word as a
+ * new namespace. */
+static void t_rtap_same_ns_continuation(void) {
+  uint8_t b[64] = {0};
+  b[0] = 0;
+  uint32_t w0 = 0x2 | (1u << 31);      /* FLAGS + ext bit only */
+  b[4] = w0; b[5] = w0 >> 8; b[6] = w0 >> 16; b[7] = w0 >> 24;
+  /* Bytes 8-11 would be read as a second present word by the old code
+   * (0x2 | W_RT_NEXT, i.e. "FLAGS + another namespace follows"); the fix
+   * must never read them as such. Only byte 8 is touched, as the FLAGS
+   * field's own 1-byte data. */
+  uint32_t w1 = 0x2 | (1u << 29);
+  b[8] = w1; b[9] = w1 >> 8; b[10] = w1 >> 16; b[11] = w1 >> 24;
+  b[8] = 0x10;                          /* FLAGS: FCS present, not bad */
+  b[2] = 12; b[3] = 0;                  /* it_len 12: covers the leftover bytes too */
+  struct rtap_info ri;
+  CHECK_EQ(rtap_parse(b, 64, &ri), 0);
+  CHECK_EQ(ri.has_fcs, 1); CHECK_EQ(ri.bad_fcs, 0);
+  CHECK_EQ(ri.rssi[0], RT_ABSENT); CHECK_EQ(ri.rssi[1], RT_ABSENT);
+  CHECK_EQ(ri.noise[0], RT_ABSENT); CHECK_EQ(ri.noise[1], RT_ABSENT);
+  CHECK_EQ(ri.phy_flags & RT_PHY_VALID, 0);
+}
+
+/* F3: a single-namespace header carrying DBM_ANTSIGNAL + DBM_ANTNOISE (no
+ * extended namespace at all) falls back to rssi[0]/noise[0] = the combined
+ * reading; rssi[1]/noise[1] stay absent. */
+static void t_rtap_phy_valid_single_ns_fallback(void) {
+  uint8_t b[64] = {0};
+  b[0] = 0;
+  uint32_t w0 = (1u << 5) | (1u << 6);  /* DBM_ANTSIGNAL, DBM_ANTNOISE; no ext */
+  b[4] = w0; b[5] = w0 >> 8; b[6] = w0 >> 16; b[7] = w0 >> 24;
+  b[8] = (uint8_t)(int8_t)-50;          /* combined signal */
+  b[9] = (uint8_t)(int8_t)-90;          /* combined noise */
+  b[2] = 10; b[3] = 0;                  /* it_len 10 */
+  struct rtap_info ri;
+  CHECK_EQ(rtap_parse(b, 64, &ri), 0);
+  CHECK_EQ(ri.phy_flags & RT_PHY_VALID, RT_PHY_VALID);
+  CHECK_EQ(ri.rssi[0], -50); CHECK_EQ(ri.rssi[1], RT_ABSENT);
+  CHECK_EQ(ri.noise[0], -90); CHECK_EQ(ri.noise[1], RT_ABSENT);
+}
+
 void t_rtap(const char *fx) {
   char path[512];
   snprintf(path, sizeof path, "%s/frames.pcap", fx);
@@ -78,4 +123,5 @@ void t_rtap(const char *fx) {
   CHECK_EQ(n, 4);
   if (n != 4) return;
   t_rtap_fixtures(); t_rtap_malformed(); t_rtap_unknown_field(); t_rtap_vendor_ns();
+  t_rtap_same_ns_continuation(); t_rtap_phy_valid_single_ns_fallback();
 }
