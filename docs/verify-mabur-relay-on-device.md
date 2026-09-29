@@ -185,3 +185,23 @@ Flashed CPE (master `b0a3039` image), drone low-power mode temporarily disabled
   fragmentation of every ~1.5 KB datagram (54 B radiotap pushes 1,435 B frames
   over the 1,472 B UDP payload), and the WS path's per-frame slot copy + TCP.
 
+## Full-rate run, protocol v2, 2026-09-29
+
+CPE flashed with `feat/relay-v2` at `d5d5b8d` (compact 20-byte FRAME header, FCS
+stripped, UDP `SO_NO_CHECK`, sendmmsg/writev batching). Same setup as the v1
+run: drone low-power disabled (restored after), link 136 HT40- at mcs4/40,
+~3,100–3,200 frames/s, 30 s windows.
+
+| | UDP only | WS only | UDP + WS |
+|---|---|---|---|
+| Frames delivered | 95,560 (3,185/s, 36.2 Mb/s) | 96,501 (3,217/s) | UDP 93,058 (3,102/s), WS 99,606 (3,113/s) |
+| Datagrams IP-fragmented | **0 %** (v1: 96 %) | n/a | 0 % |
+| Relay `seq` gaps | 0 | 0 | 0 / 0 |
+| RX-socket drops | 0 | 0 (v1: ~20 %) | 0 (v1: ~50 %) |
+| CPE CPU | **58 %** (v1: 65 %) | **71 %** (v1: 95 %) | **93 %** (v1: 100 %, saturated) |
+
+- UDP only: -7 pts, fragmentation gone, still **above the < 50 % gate**.
+- WS only: -24 pts; a browser spotter now keeps up at full rate with no loss.
+- UDP + WS: both subscribers get the full stream with zero loss, but at 93 %
+  CPU there is almost no headroom (a higher bitrate would tip it over).
+
