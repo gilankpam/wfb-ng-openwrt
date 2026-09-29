@@ -5,7 +5,7 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 START="$HERE/../files/mabur-relay-start"
 fail=0
 TMP=$(mktemp -d); LOG="$TMP/log"; BIN="$TMP/bin"; mkdir -p "$BIN"
-for c in iw ip; do printf '#!/bin/sh\necho "%s $*" >> "%s"\nexit 0\n' "$c" "$LOG" > "$BIN/$c"; chmod +x "$BIN/$c"; done
+for c in iw ip logger; do printf '#!/bin/sh\necho "%s $*" >> "%s"\nexit 0\n' "$c" "$LOG" > "$BIN/$c"; chmod +x "$BIN/$c"; done
 printf '#!/bin/sh\necho "relay $*" >> "%s"\nexit 0\n' "$LOG" > "$BIN/mabur-relay"; chmod +x "$BIN/mabur-relay"
 
 assert() { if grep -q -- "$1" "$LOG"; then echo "ok - $2"; else echo "NOT ok - $2 (missing: $1)"; fail=1; fi; }
@@ -38,6 +38,24 @@ assert "relay -i mon0 -u 8310 -w 8311 -c 136 -s 2 -S $TMP/state" "daemon exec'd 
 echo "149 HT40+" > "$TMP/state"; run
 assert "iw dev mon0 set channel 149 HT40+" "state file channel used"
 assert "relay -i mon0 -u 8310 -w 8311 -c 149 -s 1" "daemon told the state channel"
+
+# F4: stale state channel fails at retune -> logs, retries once with the
+# boot channel, and the daemon is told the (fallen-back-to) boot channel.
+cat > "$BIN/iw" <<EOF
+#!/bin/sh
+echo "iw \$*" >> "$LOG"
+if [ "\$1 \$3 \$4 \$5 \$6" = "dev set channel 149 HT40+" ]; then
+    exit 1
+fi
+exit 0
+EOF
+chmod +x "$BIN/iw"
+echo "149 HT40+" > "$TMP/state"; run
+assert "iw dev mon0 set channel 149 HT40+" "stale state channel attempted first"
+assert "iw dev mon0 set channel 136 HT40-" "boot channel retried after stale-state failure"
+assert "relay -i mon0 -u 8310 -w 8311 -c 136 -s 2 -S $TMP/state" "daemon exec'd with boot channel after fallback"
+# Restore the always-succeeding iw stub for the remaining cases.
+printf '#!/bin/sh\necho "iw $*" >> "%s"\nexit 0\n' "$LOG" > "$BIN/iw"; chmod +x "$BIN/iw"
 
 # Garbage state file -> boot channel.
 echo "banana" > "$TMP/state"; run

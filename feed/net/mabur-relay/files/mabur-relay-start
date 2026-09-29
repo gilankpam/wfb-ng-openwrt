@@ -12,17 +12,28 @@ BOOT_CHANNEL=136; BOOT_SEC=HT40-; UDP_PORT=8310; WS_PORT=8311
 
 sec_code() { case "$1" in HT20) echo 0;; HT40+) echo 1;; HT40-) echo 2;; *) return 1;; esac; }
 
-ch="$BOOT_CHANNEL"; sec="$BOOT_SEC"
+ch="$BOOT_CHANNEL"; sec="$BOOT_SEC"; from_state=0
 if [ -f "$RELAY_STATE" ]; then
     read -r sch ssec < "$RELAY_STATE"
-    case "$sch" in ''|*[!0-9]*) ;; *) sec_code "$ssec" >/dev/null && { ch="$sch"; sec="$ssec"; } ;; esac
+    case "$sch" in ''|*[!0-9]*) ;; *) sec_code "$ssec" >/dev/null && { ch="$sch"; sec="$ssec"; from_state=1; } ;; esac
 fi
 
 iw dev "$MON" del 2>/dev/null
 iw reg set "$REG"
 iw phy "$PHY" interface add "$MON" type monitor flags fcsfail otherbss || exit 1
 ip link set "$MON" up || exit 1
-iw dev "$MON" set channel "$ch" "$sec" || exit 1
+if ! iw dev "$MON" set channel "$ch" "$sec"; then
+    # A channel restored from the state file can be stale (e.g. the last
+    # session left it mid-hop, or the regdomain/phy no longer allows it).
+    # Retry once with the boot channel before giving up.
+    if [ "$from_state" = 1 ]; then
+        logger -t mabur-relay "stale state channel $ch $sec failed to set, falling back to boot channel $BOOT_CHANNEL $BOOT_SEC"
+        ch="$BOOT_CHANNEL"; sec="$BOOT_SEC"
+        iw dev "$MON" set channel "$ch" "$sec" || exit 1
+    else
+        exit 1
+    fi
+fi
 # TX power on the phy: `iw dev <mon> set txpower` is EOPNOTSUPP on AR9344.
 [ -n "$TXPOWER" ] && iw phy "$PHY" set txpower fixed "$TXPOWER"
 

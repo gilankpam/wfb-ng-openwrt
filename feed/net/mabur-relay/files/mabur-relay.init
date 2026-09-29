@@ -25,7 +25,3 @@ stop_service() {
     [ -f "$RELAY_CONF" ] && . "$RELAY_CONF"
     iw dev "$MON" del 2>/dev/null
 }
-
-service_triggers() {
-    procd_add_reload_trigger "mabur-relay"
-}

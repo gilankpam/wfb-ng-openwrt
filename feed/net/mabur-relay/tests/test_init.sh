@@ -9,7 +9,6 @@ printf '#!/bin/sh\necho "iw $*" >> "%s"\n' "$LOG" > "$BIN/iw"; chmod +x "$BIN/iw
 procd_open_instance() { echo "open_instance $*" >> "$LOG"; }
 procd_set_param() { echo "set_param $*" >> "$LOG"; }
 procd_close_instance() { echo "close_instance" >> "$LOG"; }
-procd_add_reload_trigger() { :; }
 assert() { if grep -q -- "$1" "$LOG"; then echo "ok - $2"; else echo "NOT ok - $2 (missing: $1)"; fail=1; fi; }
 
 export RELAY_CONF="$TMP/none.conf"
