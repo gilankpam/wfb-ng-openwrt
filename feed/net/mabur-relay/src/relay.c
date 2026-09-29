@@ -482,10 +482,17 @@ static void flush_ws(int nb) {
     for (int k = 0; k < nb; k++) {
       memcpy(h, batch[k].hdr, sizeof h);
       if (c->dropped) h[MR_FLAGS_OFFSET] |= MR_FLAG_DROPPED;
-      if (ws_enqueue(i, h, sizeof h, batch[k].d, batch[k].dl, 0) < 0) { c->drops++; c->dropped = 1; }
-      else c->dropped = 0;
+      if (ws_enqueue(i, h, sizeof h, batch[k].d, batch[k].dl, 0) < 0) {
+        /* Queue is full (WS_QCAP) only because this pass hasn't flushed
+         * yet, not because the client is actually behind: drain once and
+         * retry before counting a real drop. */
+        ws_flush(i);
+        if (!c->used) break;   /* ws_flush may have closed the client */
+        if (ws_enqueue(i, h, sizeof h, batch[k].d, batch[k].dl, 0) < 0) { c->drops++; c->dropped = 1; }
+        else c->dropped = 0;
+      } else c->dropped = 0;
     }
-    ws_flush(i);
+    if (c->used) ws_flush(i);
   }
 }
 
