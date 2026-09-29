@@ -164,17 +164,19 @@ Flashed CPE (master `b0a3039` image), drone low-power mode temporarily disabled
 (restored afterwards), link on 136 HT40- at mcs4/40, drone ~3,100 frames/s.
 30 s windows, host on the CPE LAN.
 
-| | UDP subscriber only | UDP + one WS subscriber |
-|---|---|---|
-| Relay frames read | 92,832 (3,094/s, 36.1 Mb/s) | 48,181 (1,606/s) |
-| GS Realtek cards, same window | 91,396 / 90,496 | — |
-| Datagrams IP-fragmented | 96 % | 98 % |
-| Relay `seq` gaps (relay→client) | 0 | 0 (UDP), 0 (WS) |
-| RX-socket drops (`rx socket dropped`) | 0 | ~1,000–1,700 frames/s |
-| CPE CPU | **65 %** (relay ~75 % in `top`) | **100 %** (saturated) |
+| | UDP subscriber only | UDP + one WS subscriber | WS subscriber only |
+|---|---|---|---|
+| Relay frames read | 92,832 (3,094/s, 36.1 Mb/s) | 48,181 (1,606/s) | 72,766 (2,426/s) |
+| GS Realtek cards, same window | 91,396 / 90,496 | — | — |
+| Datagrams IP-fragmented | 96 % | 98 % | n/a (TCP) |
+| Relay `seq` gaps (relay→client) | 0 | 0 (UDP), 0 (WS) | 0 |
+| RX-socket drops (`rx socket dropped`) | 0 | ~1,000–1,700 frames/s | ~12,200 in the window (~400–650/s) |
+| CPE CPU | **65 %** (relay ~75 % in `top`) | **100 %** (saturated) | **95 %** (relay ~85 %) |
 
 - **One UDP subscriber at full rate: works, no loss anywhere, but CPU 65 % —
   FAILS the < 50 % gate** (headroom ~35 %).
+- **WS alone at full rate: also NOT viable** — 95 % CPU and ~20 % of frames
+  lost at the RX socket; the WS path costs more than the UDP path.
 - **UDP + WS at full rate: NOT viable as built.** The relay saturates the
   560 MHz MIPS and loses about half the air frames at the RX socket; the
   `rxdrop` warning makes this visible, as intended.
