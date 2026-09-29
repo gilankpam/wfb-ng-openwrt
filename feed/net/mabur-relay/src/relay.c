@@ -635,9 +635,9 @@ static int open_udp(void) {
   int fd = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
   if (fd < 0) return -1;
 #ifdef SO_NO_CHECK
-  /* Skip UDP checksums on outgoing video/telemetry: this LAN hop never
-   * corrupts payload without the radio link already having discarded the
-   * frame, so the checksum is pure per-packet CPU cost on the CPE. */
+  /* Skip UDP checksums on outgoing video/telemetry: the Ethernet CRC
+   * already covers this one-hop cable, so the UDP checksum only pays for
+   * itself as per-byte CPU work on a CPE with no checksum offload. */
   int one = 1;
   setsockopt(fd, SOL_SOCKET, SO_NO_CHECK, &one, sizeof one);
 #endif

@@ -33,7 +33,8 @@ static void t_rtap_malformed(void) {
   memcpy(b, fr[0], fl[0]); b[0] = 1;                    CHECK_EQ(rtap_parse(b, fl[0], &ri), -1);
   memcpy(b, fr[0], fl[0]); b[2] = 0xFF; b[3] = 0;       CHECK_EQ(rtap_parse(b, fl[0], &ri), -1);
   memcpy(b, fr[1], fl[1]); b[2] = 12; b[3] = 0;         CHECK_EQ(rtap_parse(b, fl[1], &ri), -1);
-  /* it_len cut inside the MCS field of frame 0 (MCS is the 2nd-to-last field) */
+  /* it_len cut inside the AMPDU field of frame 0 (AMPDU status is the last
+   * field, right after MCS) */
   memcpy(b, fr[0], fl[0]); b[2] = 30; b[3] = 0;         CHECK_EQ(rtap_parse(b, fl[0], &ri), -1);
 }
 

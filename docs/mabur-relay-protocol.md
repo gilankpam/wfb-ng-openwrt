@@ -2,7 +2,8 @@
 
 This is the committed contract between `mabur-relay` (this repo,
 `feed/net/mabur-relay/src/`) and its clients — the mabur-side `RemoteCard` in
-`maburgs` and the web GS's WebSocket source. It is copied verbatim from
+`maburgs` and the web GS's WebSocket source. It reflects spec §2 plus the
+2026-09-29 v2 amendment in
 `docs/superpowers/specs/2026-09-29-mabur-relay-design.md` (dev-machine only,
 gitignored); this file is the one that ships. The source of truth for the
 byte layout is `feed/net/mabur-relay/src/wire.c` plus the golden vectors in
@@ -65,9 +66,13 @@ Field semantics:
 - `mcs`: the MCS index from radiotap; `0xFF` when absent/unknown.
 - `rssi[2]` / `noise[2]`: per-chain (antenna 0/1) signal and noise in dBm,
   read from the extended radiotap namespaces whose `ANTENNA` field is 0 or 1;
-  `0x80` (-128) means that chain's reading is absent. EVM is not carried —
-  the ar9003 hardware only measures it reliably on short frames, so it is
-  meaningless for the video stream and stays CPE-local.
+  `0x80` (-128) means that chain's reading is absent. When `phy_valid` is set
+  (the first namespace carried `DBM_ANTSIGNAL`) but no extended namespace
+  supplied a per-chain reading, the relay falls back to putting that first
+  namespace's combined signal/noise in `rssi[0]`/`noise[0]`; `rssi[1]`/
+  `noise[1]` stay absent in that case. EVM is not carried — the ar9003
+  hardware only measures it reliably on short frames, so it is meaningless
+  for the video stream and stays CPE-local.
 - `tsf_lo`: the low 32 bits of the first radiotap namespace's TSFT.
 - `STATUS.state`: 0 tuned, 1 retuning, 2 failed, 3 refused (not owner, or
   subscriber table full). `owner`: 0 none, 1 UDP, 2 WS. `you_own`: 1 if the
@@ -111,9 +116,10 @@ poll additionally logs `rx socket dropped N frames` at `LOG_WARNING`. Diagnose
 with `logread | grep mabur-relay` on the CPE, not from client-side counters.
 
 **MTU:** the largest video frame today is 20 + 1,431 + 28 = 1,479 B — one IP
-packet; bodies above ~1,400 B still fragment. On the direct cable the kernel
-handles fragmentation cheaply and `seq` exposes any loss; the acceptance run
-measures it. WebSocket (TCP) is unaffected.
+packet; an FCS-stripped dot11 part over 1,452 B (1500 − 20 IP − 8 UDP − 20
+header) fragments. On the direct cable the kernel handles fragmentation
+cheaply and `seq` exposes any loss; the acceptance run measures it. WebSocket
+(TCP) is unaffected.
 
 **Ports (defaults):** UDP 8310, WebSocket 8311.
 
@@ -169,9 +175,11 @@ the CPE where the link was).
 - The `FRAME` payload's trailing bytes are the dot11 frame with the trailing
   4-byte FCS already stripped by the relay (when the source radiotap's
   `flags` field had bit 4, `0x10`, "frame includes FCS", set — ath9k sets
-  this in monitor mode — and the dot11 part was at least 28 B). Do not parse
-  radiotap or strip the FCS yourself; there is no radiotap on the wire at
-  all in v2.
+  this in monitor mode — and the dot11 part was at least 28 B). A frame
+  whose dot11 part is only 24–27 B keeps its FCS: the strip only fires at
+  ≥ 28 B, since stripping below that would leave less than a minimal dot11
+  header. Do not parse radiotap or strip the FCS yourself; there is no
+  radiotap on the wire at all in v2.
 - **WS subscription starts at the upgrade, not the first `HELLO`.** As soon as
   the WebSocket handshake completes, the client is a subscriber: it starts
   receiving `STATUS` and `FRAME` messages immediately, and — if it is the
