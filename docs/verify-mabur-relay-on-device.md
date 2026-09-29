@@ -110,3 +110,21 @@ back `STATUS state=3` (refused, not owner).
 
 None needed — `mabur-relay` is the image's own service; there is no
 config to revert.
+
+## Acceptance 2026-09-29
+
+Bench run, relay executed by hand from CPE /tmp (not flashed per Ruling 3).
+
+**Setup:** CPE510 v3 on current wfb-ng firmware; mabur-relay cross-built from feat/mabur-relay 83cafad with 25.12.4 SDK toolchain (-Os, 31 KB); mon0 created by hand with `flags fcsfail otherbss`; channel 136 HT40−, drone in low-rate mode at ~110 frames/s. Host on CPE's LAN via USB NIC (192.168.1.101).
+
+**Frames (30 s window):** relay 3228 frames (108/s), relay seq gaps 0 (0.000%), ch0 timestamps 0; GS Realtek cards over same window: c0 2742, c1 2670 → relay >= Realtek cards (gate: within 5%) **PASS**.
+
+**Relay STATUS counters:** rx 7591, fwd 7590, foreign 0, bad_fcs 1, drops 0.
+
+**CPE CPU:** 4% (gate < 50%) **PASS**.
+
+**Retune latency:** 20 alternating `TUNE 136 2` ↔ `TUNE 149 1` requests; all 20 completed; min 45 ms / median 46 ms / max 49 ms (gate < 150 ms) **PASS**; state file reads "136 HT40−" after run.
+
+**WS Spotter smoke test:** Python WS client in lieu of browser; handshake 101, 372 frames over 3 s. With `relayprobe.py` UDP subscriber still owning the tune, WS `TUNE` attempt → `STATUS state=3, tune_id 77, owner 1, you_own 0`, radio remained on 136 **PASS**.
+
+**Not exercised:** high-rate video (drone was at ~110 frames/s, so IP-fragment loss at full rate is unmeasured); sysupgrade flash and boot/procd path (user's step).
