@@ -4,6 +4,15 @@ Acceptance gate for the TX-power uncap (patch `998-ath9k-txpower-uncap` + the wf
 fix). Run on the bench unit (`root@192.168.1.1`). The build host cannot prove RF behaviour, so
 an operator runs this against real hardware.
 
+> **Firmware note (2026-09-29):** this image no longer ships wfb-ng —
+> `mabur-relay` replaced it (see the main `README.md`). The TX-power knob
+> moved with it: `TXPOWER=` (mBm) in `/etc/mabur-relay.conf`, applied on the
+> phy by `/usr/libexec/mabur-relay-start` every time the service (re)starts
+> (`/etc/init.d/mabur-relay restart`). The `iw`/register-level checks below
+> are unaffected by that swap — they exercise the ath9k kmod directly — and
+> the measured history in this file (§2/§3 register values, the "Verified on
+> the bench" note) still describes that same kmod and stands as recorded.
+
 ## 1. Flash & module sanity
 
 Flash `output/<rev>/...-cpe510-v3-...-sysupgrade.bin` (sysupgrade or TFTP recovery). Then:
@@ -15,7 +24,9 @@ Flash `output/<rev>/...-cpe510-v3-...-sysupgrade.bin` (sysupgrade or TFTP recove
 
 ## 2. Higher power is reachable (primary proof)
 
-Bring up a monitor vif on a 5.8 GHz channel (the wfb-ng launcher does this on start), then:
+Bring up a monitor vif on a 5.8 GHz channel (`mabur-relay-start` does this
+automatically at boot/respawn, per `/etc/mabur-relay.conf`'s `BOOT_CHANNEL`),
+then:
 
 ```
 iw phy phy0 set txpower fixed 3000      # request 30 dBm (note: phy, not "dev mon0" — that is -122)
@@ -48,20 +59,22 @@ iw phy phy0 set txpower auto
 iw dev mon0 info | grep txpower         # EXPECT: ~23-25 dBm (calibrated), NOT 30/31.5
 ```
 
-Then, with `TXPOWER=` empty in `/etc/wfb-ng.conf`, restart wfb-ng and re-check: power must come
-up at the calibrated ~25, never hot. `iw phy phy0 info` channel max must still read the
+Then, with `TXPOWER=` empty in `/etc/mabur-relay.conf`, restart the relay
+(`/etc/init.d/mabur-relay restart`) and re-check: power must come up at the
+calibrated ~25, never hot. `iw phy phy0 info` channel max must still read the
 calibrated value even after the §2 high set (proves the advertised default was not raised).
 
-## 4. wfb-ng knob end-to-end
+## 4. mabur-relay TXPOWER knob end-to-end
 
-Set `TXPOWER=2700` in `/etc/wfb-ng.conf`, restart wfb-ng, then:
+Set `TXPOWER=2700` in `/etc/mabur-relay.conf`, restart the relay
+(`/etc/init.d/mabur-relay restart`), then:
 
 ```
 iw dev mon0 info | grep txpower         # EXPECT: 27.00 dBm
 ```
 
-This proves the launcher fix (sets power via `iw phy`, since `iw dev mon0 set txpower` is -122 on
-this AR9344) drives the knob end-to-end.
+This proves `mabur-relay-start` (sets power via `iw phy`, since `iw dev mon0
+set txpower` is -122 on this AR9344) drives the knob end-to-end.
 
 ## 5. RF / link validation (gold standard, if gear available)
 

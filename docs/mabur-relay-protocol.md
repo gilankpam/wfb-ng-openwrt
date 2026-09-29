@@ -102,6 +102,17 @@ the CPE where the link was).
 ## Client obligations
 
 - Send `HELLO` every 500 ms; a silent client is dropped after 2 s.
+- **WS subscription starts at the upgrade, not the first `HELLO`.** As soon as
+  the WebSocket handshake completes, the client is a subscriber: it starts
+  receiving `STATUS` and `FRAME` messages immediately, and — if it is the
+  oldest WebSocket client and no UDP subscriber exists — it is already tune
+  owner, all before it has sent its first `HELLO`. `HELLO` is purely the 2 s
+  keepalive that stops the relay reaping an otherwise-idle connection; it is
+  not what makes the connection a subscriber.
+- A `Sec-WebSocket-Key` of 64 characters or more is rejected: the relay closes
+  the TCP connection without sending an HTTP response (no `101`, no error
+  status — the handshake just fails). Real browsers always send a 24-byte
+  key, so this only matters to a hand-rolled client.
 - Treat `FRAME.rx_channel == 0` as "channel unknown" (mid-retune).
 - Detect relay→client loss from `FRAME.seq` gaps and `flags` bit1; detect
   air loss from the dot11 sequence number inside the frame.
