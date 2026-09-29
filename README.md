@@ -6,11 +6,12 @@
 
 Minimal OpenWrt firmware that turns a TP-Link CPE510 into a **remote receive
 card** for mabur, an RTP-free FPV video link: the CPE hears the drone's
-downlink on its panel antenna and forwards every mabur frame — radiotap
-header intact, CRC-failed frames included — to `maburgs` over UDP and to the
-web GS in **Spotter** mode over plain `ws://`. Clients steer the radio
-(channel + HT40 secondary) over the same link. No key or decrypt logic lives
-on the device; that stays in mabur's receivers.
+downlink on its panel antenna, parses radiotap on-device, and forwards every
+mabur frame — a compact 20-byte header (MCS, per-chain RSSI/noise, TSF) ahead
+of the 802.11 payload with FCS stripped, CRC-failed frames included — to
+`maburgs` over UDP and to the web GS in **Spotter** mode over plain `ws://`.
+Clients steer the radio (channel + HT40 secondary) over the same link. No key
+or decrypt logic lives on the device; that stays in mabur's receivers.
 
 - OpenWrt **25.12** (`ath79/generic`), CPE510 **v1/v2/v3**.
 - Ships the in-tree `mabur-relay` daemon (single-threaded C, no library
@@ -103,14 +104,17 @@ See `docs/mabur-relay-protocol.md` for the wire protocol contract and
 ## Radio metrics: SNR and EVM
 
 The image carries patched `mac80211`/`ath9k` kmods that expose two extra
-per-frame metrics in the monitor-mode radiotap header, so maburgs / the web GS
-see them per antenna next to RSSI:
+per-frame metrics in the monitor-mode radiotap header, which `mabur-relay`
+parses on the CPE:
 
-- **SNR [dB]** — derived from the calibrated noise floor (radiotap `DBM_ANTNOISE`).
+- **SNR [dB]** — the relay forwards per-chain RSSI and noise (from the
+  calibrated noise floor, radiotap `DBM_ANTNOISE`) in the v2 `FRAME` header;
+  maburgs / the web GS compute SNR client-side from that pair (see
+  `docs/mabur-relay-protocol.md`).
 - **EVM [dB]** — `|EVM|` in dB, higher = better, from the ar9003 RX descriptor's
-  per-pilot EVM (radiotap `LOCK_QUALITY`). EVM is per *spatial stream*, not per
-  antenna, so the one per-frame value is shown on every antenna that received
-  the frame.
+  per-pilot EVM (radiotap `LOCK_QUALITY`). EVM is per *spatial stream*, not
+  per antenna. It is **not carried over the wire** in v2 — see the limitation
+  below for why it stays CPE-local.
 
 ### ⚠ ath9k EVM limitation (CPE510 / AR9344)
 
