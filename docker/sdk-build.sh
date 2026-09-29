@@ -44,7 +44,9 @@ for k in kmod-cfg80211 kmod-mac80211 kmod-ath kmod-ath9k kmod-ath9k-common; do
 done
 
 # Architecture sanity: the daemon must be big-endian (MSB) MIPS.
-BIN=$(find build_dir -type f -name mabur-relay -perm -u+x | head -n1)
+# Match the daemon's install path: the init script is also an executable
+# named mabur-relay (etc/init.d/), and find order is filesystem-dependent.
+BIN=$(find build_dir -type f -path '*/usr/sbin/mabur-relay' | head -n1)
 echo "Checking arch of $BIN"
 file "$BIN" | grep -q 'ELF 32-bit MSB.*MIPS' || { echo "ERROR: mabur-relay not big-endian MIPS"; file "$BIN"; exit 1; }
 echo "OK: mabur-relay is big-endian MIPS"
