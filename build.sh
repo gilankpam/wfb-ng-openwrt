@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build the minimal wfb-ng CPE510 firmware in two Docker stages:
-#   package  -> OpenWrt SDK compiles the wfb-ng .apk (+ qemu FEC self-test)
+#   package  -> OpenWrt SDK compiles the mabur-relay .apk (+ qemu BE self-test)
 #   image    -> OpenWrt ImageBuilder assembles the per-variant CPE510 images
 # All inputs are pinned in versions.env.
 set -euo pipefail
@@ -10,7 +10,7 @@ cd "$(dirname "$0")"
 
 SDK_IMAGE="wfbng-sdk:${OPENWRT_VERSION}"
 IB_IMAGE="wfbng-ib:${OPENWRT_VERSION}"
-IMG_PACKAGES="wfb-ng iw -wpad-basic-mbedtls -dnsmasq -odhcpd -ppp -ppp-mod-pppoe -firewall4 -nftables -kmod-nft-core -kmod-nft-nat -kmod-nft-offload"
+IMG_PACKAGES="mabur-relay iw -wpad-basic-mbedtls -dnsmasq -odhcpd -ppp -ppp-mod-pppoe -firewall4 -nftables -kmod-nft-core -kmod-nft-nat -kmod-nft-offload"
 # Run as root inside the container: the OpenWrt SDK's prebuilt sysroot is owned by
 # the buildbot uid, and `cp -p` during package install needs to own those files
 # (fails as a mismatched uid, e.g. on CI runners). We chown outputs back to the
@@ -43,23 +43,27 @@ build_ib_image() {
 }
 
 cmd_test() {
-  echo "=== launcher tests ==="
-  sh feed/net/wfb-ng/tests/test_launcher.sh
-  echo "=== init script tests ==="
-  sh feed/net/wfb-ng/tests/test_init.sh
+  local R=feed/net/mabur-relay
+  echo "=== relay unit tests ==="
+  make -s -C "$R/src" mabur-relay unit_tests
+  "$R/src/unit_tests" "$R/tests/fixtures"
+  echo "=== relay loop tests ==="
+  python3 "$R/tests/test_relay_loop.py"
+  echo "=== start/init script tests ==="
+  sh "$R/tests/test_start.sh"
+  sh "$R/tests/test_init.sh"
 }
 
 cmd_package() {
   build_sdk_image
   mkdir -p build/packages
   "${DOCKER_RUN[@]}" \
-    -e WFB_REPO="$WFB_REPO" -e WFB_COMMIT="$WFB_COMMIT" -e WFB_VERSION="$WFB_VERSION" \
-    "$SDK_IMAGE" sh -c 'set +e; /work/docker/sdk-build.sh && /work/docker/sdk-fectest.sh; rc=$?; chown -R "$HOST_UID:$HOST_GID" /work/build 2>/dev/null || true; exit $rc'
+    "$SDK_IMAGE" sh -c 'set +e; /work/docker/sdk-build.sh && /work/docker/sdk-selftest.sh; rc=$?; chown -R "$HOST_UID:$HOST_GID" /work/build 2>/dev/null || true; exit $rc'
 }
 
 cmd_image() {
   build_ib_image
-  ls build/packages/wfb-ng-*.apk >/dev/null 2>&1 || { echo "Run './build.sh package' first."; exit 1; }
+  ls build/packages/mabur-relay-*.apk >/dev/null 2>&1 || { echo "Run './build.sh package' first."; exit 1; }
   rm -rf build/overlay && mkdir -p build/overlay/etc
   if [ -d files ]; then cp -a files/. build/overlay/; fi
   rm -f build/overlay/.gitkeep

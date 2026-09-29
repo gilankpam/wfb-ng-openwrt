@@ -1,25 +1,22 @@
 #!/bin/sh
-# Runs inside the SDK container (as the host uid). Compiles the wfb-ng package
-# and copies the built package to /work/build/packages, then checks the binary
-# arch. OpenWrt 25.12 builds the apk format (.apk), not legacy .ipk.
+# Runs inside the SDK container (as the host uid). Compiles the mabur-relay
+# package and copies it to /work/build/packages, then checks the binary arch.
+# OpenWrt 25.12 builds the apk format (.apk), not legacy .ipk.
 set -eu
 cd /opt/sdk
+sed -i '/^src-link wfbng /d' feeds.conf
 
-grep -q '^src-link wfbng ' feeds.conf 2>/dev/null || echo 'src-link wfbng /work/feed' >> feeds.conf
-./scripts/feeds update wfbng
-# wfb-ng also exists in the official 'packages' feed (the full upstream version);
-# -p wfbng forces OUR fork's package to win the name collision.
-./scripts/feeds install -p wfbng -f wfb-ng
-./scripts/feeds install libpcap libsodium
+grep -q '^src-link mabur ' feeds.conf 2>/dev/null || echo 'src-link mabur /work/feed' >> feeds.conf
+./scripts/feeds update mabur
+./scripts/feeds install -p mabur -f mabur-relay
 
-grep -q '^CONFIG_PACKAGE_wfb-ng=y' .config 2>/dev/null || echo 'CONFIG_PACKAGE_wfb-ng=y' >> .config
+grep -q '^CONFIG_PACKAGE_mabur-relay=y' .config 2>/dev/null || echo 'CONFIG_PACKAGE_mabur-relay=y' >> .config
 make defconfig
-make package/wfb-ng/compile -j"$(nproc)" \
-  WFB_REPO="${WFB_REPO}" WFB_COMMIT="${WFB_COMMIT}" WFB_VERSION="${WFB_VERSION}"
+make package/mabur-relay/compile -j"$(nproc)"
 
 mkdir -p /work/build/packages
-PKG=$(find bin/packages -name 'wfb-ng-*.apk' | head -n1)
-[ -n "$PKG" ] || { echo "ERROR: no wfb-ng .apk produced"; find bin/packages -name 'wfb-ng*' -o -name '*.apk' | head; exit 1; }
+PKG=$(find bin/packages -name 'mabur-relay-*.apk' | head -n1)
+[ -n "$PKG" ] || { echo "ERROR: no mabur-relay .apk produced"; find bin/packages -name '*.apk' | head; exit 1; }
 cp -v "$PKG" /work/build/packages/
 
 # --- Patched mac80211/ath9k bundle: radiotap DBM_ANTNOISE so wfb-ng reports SNR. ---
@@ -46,8 +43,8 @@ for k in kmod-cfg80211 kmod-mac80211 kmod-ath kmod-ath9k kmod-ath9k-common; do
   cp -v "$f" /work/build/packages/
 done
 
-# Architecture sanity: the binaries must be big-endian (MSB) MIPS.
-BIN=$(find build_dir -type f -name wfb_rx | head -n1)
+# Architecture sanity: the daemon must be big-endian (MSB) MIPS.
+BIN=$(find build_dir -type f -name mabur-relay -perm -u+x | head -n1)
 echo "Checking arch of $BIN"
-file "$BIN" | grep -q 'ELF 32-bit MSB.*MIPS' || { echo "ERROR: wfb_rx not big-endian MIPS"; file "$BIN"; exit 1; }
-echo "OK: wfb_rx is big-endian MIPS"
+file "$BIN" | grep -q 'ELF 32-bit MSB.*MIPS' || { echo "ERROR: mabur-relay not big-endian MIPS"; file "$BIN"; exit 1; }
+echo "OK: mabur-relay is big-endian MIPS"
